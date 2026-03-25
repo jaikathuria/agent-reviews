@@ -63,6 +63,23 @@
         "title": "Agent Review: Switch Review File"
       }
     ],
+    "keybindings": [
+      {
+        "command": "agentReview.reload",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
+      },
+      {
+        "command": "agentReview.postToGitHub",
+        "key": "ctrl+shift+g",
+        "mac": "cmd+shift+g"
+      },
+      {
+        "command": "agentReview.switchReview",
+        "key": "ctrl+shift+w",
+        "mac": "cmd+shift+w"
+      }
+    ],
     "menus": {
       "comments/comment/title": [
         {
