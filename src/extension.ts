@@ -3,10 +3,11 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { parseReviewFile, findReviewFiles, isReviewFilename, Severity } from "./parser";
-import { parseGitmodules } from "./resolver";
-import { ReviewCommentController, AgentReviewComment } from "./comments";
+import { parseGitmodules, resolveGitRoot } from "./resolver";
+import { ReviewCommentController, AgentReviewComment, NavigationEntry } from "./comments";
 import { registerGitHubCommands } from "./github";
 import { registerGenerateInstructionsCommand } from "./generate-instructions";
+import { GitContentProvider, SCHEME } from "./diffProvider";
 
 const ALL_SEVERITIES: { label: string; value: Severity }[] = [
   { label: "$(error) Blocking", value: "blocking" },
@@ -22,6 +23,14 @@ let currentFilePath: string | undefined;
 let fileWatcher: fs.FSWatcher | undefined;
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
+let gitContentProvider: GitContentProvider | undefined;
+
+// Navigation state
+let navigationList: NavigationEntry[] = [];
+let commentNavIndex = -1;
+
+// Flag to prevent diff-on-click loop when we programmatically open a diff
+let isOpeningDiff = false;
 
 function getWorkspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -54,9 +63,13 @@ async function loadComments(
   try {
     const review = await parseReviewFile(filePath);
     const submoduleMap = parseGitmodules(workspaceRoot);
+    const gitRoot = resolveGitRoot(workspaceRoot, submoduleMap, review.pr.repo);
 
     const stat = await fs.promises.stat(filePath);
     const fallbackTimestamp = stat.mtime;
+
+    // Clear content provider cache on reload
+    gitContentProvider?.clearCache();
 
     const { loaded, skipped } = controller.loadReview(
       review,
@@ -64,10 +77,18 @@ async function loadComments(
       submoduleMap,
       extensionUri,
       fallbackTimestamp,
-      filePath
+      filePath,
+      gitRoot
     );
 
     currentFilePath = filePath;
+
+    // Rebuild navigation list
+    navigationList = controller.getNavigationList();
+    commentNavIndex = -1;
+
+    // Scan currently visible editors for review: scheme (PR extension)
+    scanVisibleEditorsForReviewScheme();
 
     const verdictLabel =
       review.summary.verdict === "APPROVE"
@@ -95,6 +116,48 @@ async function loadComments(
     vscode.window.showErrorMessage(
       `Agent Review: Failed to load ${filePath}: ${errorMessage}`
     );
+  }
+}
+
+/**
+ * Scan currently visible editors for `review:` scheme (GitHub PR extension)
+ * and attach comments to matching URIs.
+ */
+function scanVisibleEditorsForReviewScheme(): void {
+  if (!controller) {
+    return;
+  }
+  for (const editor of vscode.window.visibleTextEditors) {
+    handleReviewSchemeEditor(editor.document.uri);
+  }
+}
+
+/**
+ * Handle a `review:` scheme URI from the GitHub PR extension.
+ * Parses the query to extract path and side, validates the PR, and attaches comments.
+ */
+function handleReviewSchemeEditor(uri: vscode.Uri): void {
+  if (uri.scheme !== "review" || !controller) {
+    return;
+  }
+  try {
+    const params = JSON.parse(uri.query);
+    const filePath: string | undefined = params.path;
+    const isBase: boolean | undefined = params.isBase;
+
+    if (!filePath) {
+      return;
+    }
+
+    // Validate this matches our loaded PR (if prNumber is available in params)
+    if (params.prNumber !== undefined && !controller.matchesPR(params.prNumber)) {
+      return;
+    }
+
+    const side = isBase ? "LEFT" : "RIGHT";
+    controller.attachCommentsToUri(uri, filePath, side);
+  } catch {
+    // Not a PR extension review URI or invalid JSON — ignore
   }
 }
 
@@ -135,6 +198,12 @@ export function activate(context: vscode.ExtensionContext): void {
   controller = new ReviewCommentController();
   context.subscriptions.push({ dispose: () => controller?.dispose() });
 
+  // Register git content provider for diff base content
+  gitContentProvider = new GitContentProvider();
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(SCHEME, gitContentProvider)
+  );
+
   // Status bar item — clicking reloads comments
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
@@ -142,6 +211,42 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   statusBarItem.command = "agentReview.reload";
   context.subscriptions.push(statusBarItem);
+
+  // --- Diff-on-click: intercept file opens from comment clicks ---
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(async (editor: vscode.TextEditor | undefined) => {
+      if (!editor || !controller || isOpeningDiff) {
+        return;
+      }
+      const uri = editor.document.uri;
+      if (uri.scheme === "file") {
+        const relativePath = controller.getRelativePath(uri);
+        if (relativePath && controller.hasCommentsForPath(relativePath)) {
+          isOpeningDiff = true;
+          try {
+            await controller.openDiffForFile(relativePath);
+          } finally {
+            // Reset after a short delay to allow the diff editor to settle
+            setTimeout(() => {
+              isOpeningDiff = false;
+            }, 500);
+          }
+        }
+      }
+    })
+  );
+
+  // --- PR extension integration: listen for review: scheme editors ---
+  context.subscriptions.push(
+    vscode.window.onDidChangeVisibleTextEditors((editors: readonly vscode.TextEditor[]) => {
+      if (!controller) {
+        return;
+      }
+      for (const editor of editors) {
+        handleReviewSchemeEditor(editor.document.uri);
+      }
+    })
+  );
 
   // --- GitHub integration ---
   registerGitHubCommands(context, () => controller?.getReview());
@@ -189,6 +294,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentReview.clear", () => {
       controller?.clearAll();
       currentFilePath = undefined;
+      navigationList = [];
+      commentNavIndex = -1;
       statusBarItem?.hide();
       vscode.window.showInformationMessage(
         "Agent Review: All comments cleared"
@@ -220,6 +327,8 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         await controller.deleteComment(comment);
+        navigationList = controller.getNavigationList();
+        commentNavIndex = -1;
       }
     )
   );
@@ -294,6 +403,65 @@ export function activate(context: vscode.ExtensionContext): void {
     )
   );
 
+  // --- Diff & Navigation commands ---
+
+  // Open file diff
+  context.subscriptions.push(
+    vscode.commands.registerCommand("agentReview.openFileDiff", async () => {
+      if (!controller) {
+        return;
+      }
+      const files = controller.getCommentedFiles();
+      if (files.length === 0) {
+        vscode.window.showWarningMessage("Agent Review: No commented files found");
+        return;
+      }
+      const items = files.map((f) => ({
+        label: f.relativePath,
+        file: f,
+      }));
+      const selected = await vscode.window.showQuickPick(items, {
+        placeHolder: "Select file to open diff",
+      });
+      if (selected) {
+        isOpeningDiff = true;
+        try {
+          await controller.openDiffForFile(selected.file.relativePath);
+        } finally {
+          setTimeout(() => {
+            isOpeningDiff = false;
+          }, 500);
+        }
+      }
+    })
+  );
+
+  // Next comment
+  context.subscriptions.push(
+    vscode.commands.registerCommand("agentReview.nextComment", async () => {
+      if (navigationList.length === 0) {
+        vscode.window.showWarningMessage("Agent Review: No comments to navigate");
+        return;
+      }
+      commentNavIndex = (commentNavIndex + 1) % navigationList.length;
+      await navigateToComment(navigationList[commentNavIndex]);
+    })
+  );
+
+  // Previous comment
+  context.subscriptions.push(
+    vscode.commands.registerCommand("agentReview.previousComment", async () => {
+      if (navigationList.length === 0) {
+        vscode.window.showWarningMessage("Agent Review: No comments to navigate");
+        return;
+      }
+      commentNavIndex = commentNavIndex <= 0
+        ? navigationList.length - 1
+        : commentNavIndex - 1;
+      await navigateToComment(navigationList[commentNavIndex]);
+    })
+  );
+
   // --- Auto-discover review files ---
 
   const reviewsDir = getReviewsDir();
@@ -309,7 +477,7 @@ export function activate(context: vscode.ExtensionContext): void {
             files.map((f) => path.basename(f)),
             { placeHolder: "Multiple review files found — select one to load" }
           )
-          .then((selected) => {
+          .then((selected: string | undefined) => {
             if (selected) {
               const fullPath = path.join(reviewsDir, selected);
               loadComments(fullPath, context.extensionUri);
@@ -328,6 +496,33 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     },
   });
+}
+
+/**
+ * Navigate to a specific comment: open the diff and reveal the line.
+ */
+async function navigateToComment(entry: NavigationEntry): Promise<void> {
+  if (!controller) {
+    return;
+  }
+
+  isOpeningDiff = true;
+  try {
+    await controller.openDiffForFile(entry.path);
+
+    // Reveal the line in the active editor
+    const editor = vscode.window.activeTextEditor;
+    if (editor) {
+      const line = Math.max(0, entry.line - 1);
+      const range = new vscode.Range(line, 0, line, 0);
+      editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+      editor.selection = new vscode.Selection(range.start, range.start);
+    }
+  } finally {
+    setTimeout(() => {
+      isOpeningDiff = false;
+    }, 500);
+  }
 }
 
 export function deactivate(): void {}

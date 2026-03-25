@@ -74,6 +74,18 @@
       {
         "command": "agentReview.generateAgentInstructions",
         "title": "Agent Review: Generate Agent Instructions"
+      },
+      {
+        "command": "agentReview.openFileDiff",
+        "title": "Agent Review: Open File Diff"
+      },
+      {
+        "command": "agentReview.nextComment",
+        "title": "Agent Review: Next Comment"
+      },
+      {
+        "command": "agentReview.previousComment",
+        "title": "Agent Review: Previous Comment"
       }
     ],
     "keybindings": [
@@ -91,6 +103,16 @@
         "command": "agentReview.switchReview",
         "key": "ctrl+shift+w",
         "mac": "cmd+shift+w"
+      },
+      {
+        "command": "agentReview.nextComment",
+        "key": "ctrl+shift+]",
+        "mac": "cmd+shift+]"
+      },
+      {
+        "command": "agentReview.previousComment",
+        "key": "ctrl+shift+[",
+        "mac": "cmd+shift+["
       }
     ],
     "menus": {
