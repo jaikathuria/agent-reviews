@@ -63,68 +63,141 @@ All changes persist back to the JSON file automatically.
 
 The extension watches `.reviews/` for changes. When a review file is created or updated, comments auto-refresh.
 
-## Review JSON format
+## Review JSON Schema
+
+### File naming
+
+Files must be named `pr-<number>-review-comments.json` and placed in `.reviews/` at the workspace root. Examples:
+
+- `.reviews/pr-58-review-comments.json`
+- `.reviews/pr-123-review-comments.json`
+
+### Full example
 
 ```json
 {
   "pr": {
-    "repo": "org/repo-name",
+    "repo": "smallcase/las-be-distribution",
     "number": 58,
-    "title": "PR title",
+    "title": "Fix: update loan amount handling in webhooks",
     "base": "main",
-    "head": "fix/branch-name"
+    "head": "fix/loan-amount-update"
   },
   "author": {
     "name": "Claude Opus 4",
-    "iconUrl": "https://example.com/claude-avatar.png"
+    "iconUrl": "https://cdn.anthropic.com/images/icons/claude.png"
   },
   "summary": {
-    "verdict": "APPROVE | COMMENT | REQUEST_CHANGES",
-    "overview": "Summary of the review",
-    "strengths": ["What was done well"]
+    "verdict": "REQUEST_CHANGES",
+    "overview": "This PR changes how confirmedAmount is stored. Tests are solid but a few semantic questions remain.",
+    "strengths": [
+      "Good test coverage for both completed and non-completed status paths",
+      "Correctly uses the capture-and-assert mock pattern"
+    ]
   },
   "comments": [
     {
-      "path": "relative/path/to/file.go",
+      "path": "internal/api/webhook/handler.go",
       "line": 42,
       "side": "RIGHT",
       "severity": "blocking",
-      "body": "Markdown comment text",
+      "body": "This will panic if `payload.Data` is nil. Should we add a nil check before accessing `Selection.MaxAmount`?",
+      "timestamp": "2026-03-25T10:30:00Z"
+    },
+    {
+      "path": "internal/api/webhook/handler.go",
+      "line": 87,
+      "side": "RIGHT",
+      "severity": "suggestion",
+      "body": "Consider extracting this into a helper — the same pattern appears in three handlers.",
       "timestamp": "2026-03-25T10:30:00Z",
       "author": {
-        "name": "Claude Opus 4",
-        "iconUrl": "https://example.com/claude-avatar.png"
+        "name": "GPT-4o",
+        "iconUrl": "https://example.com/openai-avatar.png"
       }
     }
   ]
 }
 ```
 
+### Top-level fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `pr` | object | yes | Pull request metadata |
+| `pr.repo` | string | yes | GitHub repo in `org/repo` format (e.g., `smallcase/las-be-distribution`) |
+| `pr.number` | number | yes | PR number |
+| `pr.title` | string | yes | PR title |
+| `pr.base` | string | yes | Base branch (e.g., `main`) |
+| `pr.head` | string | yes | Head branch (e.g., `fix/loan-amount-update`) |
+| `author` | object | no | Default author for all comments (see [Author](#author)) |
+| `summary` | object | yes | Review summary |
+| `summary.verdict` | string | yes | One of: `APPROVE`, `REQUEST_CHANGES`, `COMMENT` |
+| `summary.overview` | string | yes | One-paragraph summary of the review |
+| `summary.strengths` | string[] | yes | List of things done well (can be empty array) |
+| `comments` | array | yes | Review comments (see [Comment](#comment)) |
+
+### Comment
+
+Each entry in the `comments` array represents one inline review comment.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | yes | File path relative to the repo root (e.g., `internal/api/webhook/handler.go`) |
+| `line` | number | yes | Line number in the file (1-based) |
+| `side` | string | yes | `RIGHT` (new code) or `LEFT` (old/deleted code) |
+| `severity` | string | yes | One of: `blocking`, `important`, `suggestion`, `nit`, `praise`, `learning` |
+| `body` | string | yes | Comment text in Markdown |
+| `timestamp` | string | no | ISO 8601 timestamp (e.g., `2026-03-25T10:30:00Z`). Falls back to file modification time if absent |
+| `author` | object | no | Per-comment author override (see [Author](#author)) |
+
+### Author
+
+Identifies which agent generated the review or a specific comment.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Display name (e.g., `Claude Opus 4`, `GPT-4o`, `Gemini 2.5 Pro`) |
+| `iconUrl` | string | no | URL to an avatar image |
+
+**Resolution order:** per-comment `author` > top-level `author` > fallback ("Agent Review" with severity icon).
+
 ### Severity levels
 
-| Severity | Icon | Meaning |
-|----------|------|---------|
-| `blocking` | Red circle | Must fix before merge |
-| `important` | Orange triangle | Should fix, discuss if disagree |
-| `suggestion` | Blue lightbulb | Alternative approach to consider |
-| `nit` | Green info | Nice to have, not blocking |
-| `praise` | Purple star | Good work |
-| `learning` | Teal book | Educational, no action needed |
+| Value | Icon | Meaning | Displayed as |
+|-------|------|---------|-------------|
+| `blocking` | Red circle | Must fix before merge | Expanded, unresolved |
+| `important` | Orange triangle | Should fix, discuss if disagree | Expanded, unresolved |
+| `suggestion` | Blue lightbulb | Alternative approach to consider | Collapsed |
+| `nit` | Green info | Nice to have, not blocking | Collapsed |
+| `praise` | Purple star | Good work, keep it up | Collapsed |
+| `learning` | Teal book | Educational, no action needed | Collapsed |
 
-### Author information
+### Verdict mapping
 
-The `author` field identifies which agent generated the review. It can be set at two levels:
+When posting to GitHub via the `Post Review to GitHub` command:
 
-- **Top-level `author`** — default for all comments in the review
-- **Per-comment `author`** — overrides the top-level for that specific comment
+| Verdict | GitHub event | Effect |
+|---------|-------------|--------|
+| `APPROVE` | `APPROVE` | Approves the PR |
+| `REQUEST_CHANGES` | `REQUEST_CHANGES` | Requests changes |
+| `COMMENT` | `COMMENT` | Neutral review comment |
 
-If neither is set, the display name defaults to "Agent Review" with a severity-colored icon.
+### Path resolution for monorepos
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Display name (e.g., "Claude Opus 4", "GPT-4o") |
-| `iconUrl` | string (optional) | URL to an avatar image |
+For monorepos with git submodules, the extension parses `.gitmodules` at the workspace root to resolve `pr.repo` to the correct local submodule path. For example:
 
-### Path resolution
+- `pr.repo = "smallcase/las-be-distribution"` + `.gitmodules` maps it to `distribution/`
+- Comment `path = "internal/api/webhook/handler.go"`
+- Resolved to: `distribution/internal/api/webhook/handler.go`
 
-For monorepos with git submodules, the extension parses `.gitmodules` to resolve `pr.repo` (e.g., `smallcase/las-be-distribution`) to the correct local submodule path (e.g., `distribution/`). Comment paths are then resolved relative to that submodule.
+If `.gitmodules` is absent or the repo isn't a submodule, paths are resolved directly from the workspace root.
+
+### Validation rules
+
+The extension applies these rules when loading a review file:
+
+- `pr` and `comments` array must be present — file is rejected otherwise
+- Comments missing `path`, `line`, or `body` are silently skipped (other comments still load)
+- Comments referencing files that don't exist locally are skipped with a count shown in the info message
+- `severity` defaults to `nit` styling if an unrecognized value is used
