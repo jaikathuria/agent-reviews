@@ -4,7 +4,7 @@ Displays AI-generated code review comments inline in VSCode, using the native Co
 
 ## How it works
 
-1. A code review tool (e.g., Claude Code's `/code-review-excellence` skill) generates a JSON file with review comments
+1. An AI agent generates a JSON file with review comments
 2. The JSON file is placed in `.reviews/` at the workspace root
 3. This extension picks it up and shows comments inline at the correct file and line
 
@@ -13,7 +13,7 @@ Displays AI-generated code review comments inline in VSCode, using the native Co
 ### Build the extension
 
 ```bash
-cd ~/Documents/smallcase/agent-reviews
+cd agent-reviews
 npm install
 npm run compile
 ```
@@ -77,43 +77,43 @@ Files must be named `pr-<number>-review-comments.json` and placed in `.reviews/`
 ```json
 {
   "pr": {
-    "repo": "smallcase/las-be-distribution",
-    "number": 58,
-    "title": "Fix: update loan amount handling in webhooks",
+    "repo": "acme/backend-api",
+    "number": 142,
+    "title": "Fix: validate user input before processing",
     "base": "main",
-    "head": "fix/loan-amount-update"
+    "head": "fix/input-validation"
   },
   "author": {
     "name": "Claude Opus 4",
-    "iconUrl": "https://cdn.anthropic.com/images/icons/claude.png"
+    "iconUrl": "https://example.com/agent-avatar.png"
   },
   "summary": {
     "verdict": "REQUEST_CHANGES",
-    "overview": "This PR changes how confirmedAmount is stored. Tests are solid but a few semantic questions remain.",
+    "overview": "Input validation is added but missing edge cases for empty strings and negative values.",
     "strengths": [
-      "Good test coverage for both completed and non-completed status paths",
-      "Correctly uses the capture-and-assert mock pattern"
+      "Good test coverage for the happy path",
+      "Clean separation of validation logic from handler"
     ]
   },
   "comments": [
     {
-      "path": "internal/api/webhook/handler.go",
+      "path": "src/handlers/users.ts",
       "line": 42,
       "side": "RIGHT",
       "severity": "blocking",
-      "body": "This will panic if `payload.Data` is nil. Should we add a nil check before accessing `Selection.MaxAmount`?",
+      "body": "This will throw if `req.body` is undefined. Should we add a guard before accessing `name`?",
       "timestamp": "2026-03-25T10:30:00Z"
     },
     {
-      "path": "internal/api/webhook/handler.go",
+      "path": "src/handlers/users.ts",
       "line": 87,
       "side": "RIGHT",
       "severity": "suggestion",
-      "body": "Consider extracting this into a helper — the same pattern appears in three handlers.",
+      "body": "Consider extracting this into a validation helper — the same pattern appears in three handlers.",
       "timestamp": "2026-03-25T10:30:00Z",
       "author": {
         "name": "GPT-4o",
-        "iconUrl": "https://example.com/openai-avatar.png"
+        "iconUrl": "https://example.com/other-agent-avatar.png"
       }
     }
   ]
@@ -125,7 +125,7 @@ Files must be named `pr-<number>-review-comments.json` and placed in `.reviews/`
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `pr` | object | yes | Pull request metadata |
-| `pr.repo` | string | yes | GitHub repo in `org/repo` format (e.g., `smallcase/las-be-distribution`) |
+| `pr.repo` | string | yes | GitHub repo in `org/repo` format (e.g., `acme/backend-api`) |
 | `pr.number` | number | yes | PR number |
 | `pr.title` | string | yes | PR title |
 | `pr.base` | string | yes | Base branch (e.g., `main`) |
@@ -143,7 +143,7 @@ Each entry in the `comments` array represents one inline review comment.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `path` | string | yes | File path relative to the repo root (e.g., `internal/api/webhook/handler.go`) |
+| `path` | string | yes | File path relative to the repo root (e.g., `src/handlers/users.ts`) |
 | `line` | number | yes | Line number in the file (1-based) |
 | `side` | string | yes | `RIGHT` (new code) or `LEFT` (old/deleted code) |
 | `severity` | string | yes | One of: `blocking`, `important`, `suggestion`, `nit`, `praise`, `learning` |
@@ -187,9 +187,9 @@ When posting to GitHub via the `Post Review to GitHub` command:
 
 For monorepos with git submodules, the extension parses `.gitmodules` at the workspace root to resolve `pr.repo` to the correct local submodule path. For example:
 
-- `pr.repo = "smallcase/las-be-distribution"` + `.gitmodules` maps it to `distribution/`
-- Comment `path = "internal/api/webhook/handler.go"`
-- Resolved to: `distribution/internal/api/webhook/handler.go`
+- `pr.repo = "acme/backend-api"` + `.gitmodules` maps it to `services/backend/`
+- Comment `path = "src/handlers/users.ts"`
+- Resolved to: `services/backend/src/handlers/users.ts`
 
 If `.gitmodules` is absent or the repo isn't a submodule, paths are resolved directly from the workspace root.
 
