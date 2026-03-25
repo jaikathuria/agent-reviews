@@ -1,4 +1,8 @@
 src/
 tsconfig.json
 .gitignore
+.env.example
 node_modules/
+.taskmaster/
+.vscode/
+*.vsix
