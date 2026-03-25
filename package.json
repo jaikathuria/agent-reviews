@@ -57,6 +57,10 @@
         "command": "agentReview.postToGitHub",
         "title": "Agent Review: Post Review to GitHub",
         "icon": "$(github)"
+      },
+      {
+        "command": "agentReview.switchReview",
+        "title": "Agent Review: Switch Review File"
       }
     ],
     "menus": {

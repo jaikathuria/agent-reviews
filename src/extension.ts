@@ -164,6 +164,28 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand("agentReview.switchReview", async () => {
+      const reviewsDir = getReviewsDir();
+      if (!reviewsDir) {
+        vscode.window.showWarningMessage("Agent Review: No workspace folder open");
+        return;
+      }
+      const files = await findReviewFiles(reviewsDir);
+      if (files.length === 0) {
+        vscode.window.showWarningMessage("Agent Review: No review files found in .reviews/");
+        return;
+      }
+      const selected = await vscode.window.showQuickPick(
+        files.map((f) => path.basename(f)),
+        { placeHolder: "Select review file to load" }
+      );
+      if (selected) {
+        loadComments(path.join(reviewsDir, selected), context.extensionUri);
+      }
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand("agentReview.clear", () => {
       controller?.clearAll();
       currentFilePath = undefined;
