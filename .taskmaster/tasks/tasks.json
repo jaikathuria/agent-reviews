@@ -1,0 +1,144 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Initial Git Commit",
+        "description": "Create the first commit for the agent-reviews repository with all current files using conventional commit format.",
+        "details": "Execute the following steps:\n\n1. Review all files staged for commit (current untracked files):\n   - .env.example, .gitignore, .vscodeignore\n   - README.md, package.json, package-lock.json, tsconfig.json\n   - src/*.ts (extension.ts, comments.ts, parser.ts, resolver.ts, icons.ts)\n   - icons/*.svg (blocking, important, suggestion, nit, praise, learning)\n   - .taskmaster/ directory if needed\n\n2. Ensure .gitignore includes:\n   - node_modules/\n   - out/\n   - *.vsix\n   - .reviews/\n\n3. Create commit with conventional format:\n   ```bash\n   git add .\n   git commit -m \"feat: initial VSCode extension for AI code review comments\n   \n   - Inline display of review comments using VSCode Comments API\n   - Support for review JSON files from .reviews/ directory\n   - Git submodule path resolution via .gitmodules parsing\n   - Severity-based icons (blocking, important, suggestion, nit, praise, learning)\n   - File watching with auto-refresh on JSON changes\n   - Interactive actions: edit, change severity, delete comments\n   - Commands: Load Review File, Reload Comments, Clear All Comments\"\n   ```",
+        "testStrategy": "Verify commit was created successfully with `git log --oneline -1`. Check all intended files are included with `git show --stat HEAD`. Ensure no sensitive files (node_modules, .env) are committed.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "in-progress",
+        "subtasks": [],
+        "updatedAt": "2026-03-25T11:34:16.288Z"
+      },
+      {
+        "id": "2",
+        "title": "Fix Edit/Save Flow",
+        "description": "Verify and fix the edit flow (pencil icon -> edit text -> save) to ensure it correctly persists updated comment body to the JSON file.",
+        "details": "The current implementation in comments.ts and extension.ts has the edit flow wired up. Verify and fix:\n\n1. **Edit initiation (setCommentEditing in comments.ts:101-106)**:\n   - Sets `comment.mode = vscode.CommentMode.Editing`\n   - Sets `comment.contextValue = 'agentReviewEditing'` to show save/cancel buttons\n   - Triggers UI refresh with `thread.comments = [...thread.comments]`\n\n2. **Save command (agentReview.saveComment in extension.ts:197-212)**:\n   - Currently reads `comment.body` which VSCode updates during editing\n   - Issue: When in editing mode, VSCode provides the new text via `comment.body` but we need to verify this is a string or MarkdownString\n   - Fix: Extract text properly:\n     ```typescript\n     const newBody = typeof comment.body === 'string' \n       ? comment.body \n       : (comment.body as vscode.MarkdownString).value;\n     ```\n\n3. **Persistence (updateCommentBody in comments.ts:71-84)**:\n   - Updates `this.review.comments[comment.commentIndex].body = newBody`\n   - Calls `persistAndRebuild()` which saves and rebuilds threads\n   - The `isSaving` flag prevents file watcher from reloading during save\n\n4. **Potential issues to investigate**:\n   - Verify the comment index mapping survives thread rebuilds\n   - Ensure MarkdownString body is properly converted to plain string for JSON storage\n   - Check that the editing mode is cleared after save (mode should return to Preview)\n\n5. **Fix required in updateCommentBody**:\n   ```typescript\n   async updateCommentBody(comment: AgentReviewComment, newBody: string): Promise<void> {\n     if (!this.review || !this.reviewFilePath) return;\n     const source = this.review.comments[comment.commentIndex];\n     if (source) {\n       // Store plain string, not MarkdownString\n       source.body = newBody;\n     }\n     await this.persistAndRebuild();\n   }\n   ```",
+        "testStrategy": "1. Load a review file with comments\n2. Click edit (pencil) on a comment\n3. Modify the text\n4. Click save (checkmark)\n5. Verify: Comment displays updated text\n6. Check .reviews/*.json file: body should contain new text\n7. Reload extension: comment should still show updated text\n8. Test cancel button: edit then cancel, verify original text restored",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "3",
+        "title": "Add GitHub Posting Command",
+        "description": "Implement agentReview.postToGitHub command that posts all comments from the current review to the GitHub PR as a single review using the gh CLI.",
+        "details": "Create a new command that posts the loaded review to GitHub:\n\n1. **Add command registration in package.json**:\n   ```json\n   {\n     \"command\": \"agentReview.postToGitHub\",\n     \"title\": \"Agent Review: Post to GitHub PR\"\n   }\n   ```\n\n2. **Create new file src/github.ts** for GitHub integration:\n   ```typescript\n   import * as vscode from 'vscode';\n   import { exec } from 'child_process';\n   import { promisify } from 'util';\n   import { ReviewFile, ReviewComment } from './parser';\n\n   const execAsync = promisify(exec);\n\n   interface GitHubReviewComment {\n     path: string;\n     line: number;\n     side: 'LEFT' | 'RIGHT';\n     body: string;\n   }\n\n   function mapVerdictToEvent(verdict: string): 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT' {\n     switch (verdict.toUpperCase()) {\n       case 'APPROVE': return 'APPROVE';\n       case 'REQUEST_CHANGES': return 'REQUEST_CHANGES';\n       default: return 'COMMENT';\n     }\n   }\n\n   function formatCommentBody(comment: ReviewComment): string {\n     const severityEmoji: Record<string, string> = {\n       blocking: '🚫',\n       important: '⚠️',\n       suggestion: '💡',\n       nit: 'ℹ️',\n       praise: '👍',\n       learning: '📚'\n     };\n     const emoji = severityEmoji[comment.severity] || '';\n     return `**${comment.severity.toUpperCase()}** ${emoji}\\n\\n${comment.body}`;\n   }\n\n   export async function postReviewToGitHub(review: ReviewFile): Promise<void> {\n     // Check gh CLI is available\n     try {\n       await execAsync('gh --version');\n     } catch {\n       throw new Error('GitHub CLI (gh) not found. Install from https://cli.github.com/');\n     }\n\n     const { repo, number } = review.pr;\n     const event = mapVerdictToEvent(review.summary.verdict);\n     const body = review.summary.overview;\n\n     // Build review comments for gh api\n     const comments: GitHubReviewComment[] = review.comments\n       .filter(c => c.severity !== 'praise' && c.severity !== 'learning')\n       .map(c => ({\n         path: c.path,\n         line: c.line,\n         side: c.side || 'RIGHT',\n         body: formatCommentBody(c)\n       }));\n\n     // Use gh api to create review with comments\n     const payload = JSON.stringify({\n       body,\n       event,\n       comments\n     });\n\n     const cmd = `gh api repos/${repo}/pulls/${number}/reviews -X POST --input -`;\n     await execAsync(cmd, { input: payload });\n   }\n   ```\n\n3. **Register command in extension.ts**:\n   ```typescript\n   import { postReviewToGitHub } from './github';\n\n   context.subscriptions.push(\n     vscode.commands.registerCommand('agentReview.postToGitHub', async () => {\n       if (!controller || !controller.review) {\n         vscode.window.showWarningMessage('No review loaded');\n         return;\n       }\n       const confirm = await vscode.window.showWarningMessage(\n         `Post ${controller.review.comments.length} comments to PR #${controller.review.pr.number}?`,\n         'Post Review', 'Cancel'\n       );\n       if (confirm !== 'Post Review') return;\n       \n       try {\n         await vscode.window.withProgress(\n           { location: vscode.ProgressLocation.Notification, title: 'Posting to GitHub...' },\n           () => postReviewToGitHub(controller.review)\n         );\n         vscode.window.showInformationMessage('Review posted to GitHub!');\n       } catch (err) {\n         vscode.window.showErrorMessage(`Failed: ${err.message}`);\n       }\n     })\n   );\n   ```\n\n4. **Expose review from controller**: Add getter in ReviewCommentController:\n   ```typescript\n   get currentReview(): ReviewFile | undefined {\n     return this.review;\n   }\n   ```",
+        "testStrategy": "1. Ensure gh CLI is installed and authenticated (`gh auth status`)\n2. Load a review file for a real PR\n3. Run 'Agent Review: Post to GitHub PR' command\n4. Verify confirmation dialog appears\n5. Confirm and check progress notification\n6. Verify on GitHub: review appears with correct verdict, overview as body, and inline comments at correct file:line positions\n7. Test error cases: no gh CLI, not authenticated, invalid PR number",
+        "priority": "high",
+        "dependencies": [
+          "2"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "4",
+        "title": "Add Status Bar Item",
+        "description": "Show a status bar item when a review is loaded indicating the PR number, verdict, and comment count. Clicking should reload comments.",
+        "details": "Create a status bar item that displays review status:\n\n1. **Add to extension.ts** - create status bar item in activate():\n   ```typescript\n   let statusBarItem: vscode.StatusBarItem;\n\n   export function activate(context: vscode.ExtensionContext): void {\n     // Create status bar item\n     statusBarItem = vscode.window.createStatusBarItem(\n       vscode.StatusBarAlignment.Left,\n       100\n     );\n     statusBarItem.command = 'agentReview.reload';\n     context.subscriptions.push(statusBarItem);\n     // ... rest of activation\n   }\n   ```\n\n2. **Create updateStatusBar function**:\n   ```typescript\n   function updateStatusBar(review: ReviewFile | undefined, commentCount: number): void {\n     if (!review) {\n       statusBarItem.hide();\n       return;\n     }\n\n     const verdictIcon: Record<string, string> = {\n       'APPROVE': '$(check)',\n       'REQUEST_CHANGES': '$(x)',\n       'COMMENT': '$(comment)'\n     };\n     \n     const icon = verdictIcon[review.summary.verdict] || '$(comment)';\n     statusBarItem.text = `${icon} PR #${review.pr.number} (${commentCount})`;\n     statusBarItem.tooltip = `${review.pr.title}\\n${review.summary.verdict}\\n${commentCount} comments\\n\\nClick to reload`;\n     statusBarItem.show();\n   }\n   ```\n\n3. **Call updateStatusBar after loading comments** in loadComments():\n   ```typescript\n   const { loaded, skipped } = controller.loadReview(...);\n   updateStatusBar(review, loaded);\n   ```\n\n4. **Hide status bar on clear**:\n   ```typescript\n   context.subscriptions.push(\n     vscode.commands.registerCommand('agentReview.clear', () => {\n       controller?.clearAll();\n       currentFilePath = undefined;\n       updateStatusBar(undefined, 0);  // Hide status bar\n       vscode.window.showInformationMessage('Agent Review: All comments cleared');\n     })\n   );\n   ```\n\n5. **Optional: Add tooltip with summary overview**:\n   ```typescript\n   statusBarItem.tooltip = new vscode.MarkdownString(\n     `### ${review.pr.title}\\n` +\n     `**Verdict:** ${review.summary.verdict}\\n` +\n     `**Comments:** ${commentCount}\\n\\n` +\n     `${review.summary.overview}\\n\\n` +\n     `*Click to reload*`\n   );\n   ```",
+        "testStrategy": "1. Open workspace without review file - status bar should not appear\n2. Load a review file - status bar should show PR #, verdict icon, comment count\n3. Hover over status bar - tooltip shows PR title, verdict, count, and overview\n4. Click status bar - comments should reload\n5. Clear all comments - status bar should hide\n6. Load review with different verdicts (APPROVE/REQUEST_CHANGES/COMMENT) - verify correct icon displays",
+        "priority": "medium",
+        "dependencies": [
+          "2"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "5",
+        "title": "Package as Installable VSIX",
+        "description": "Add @vscode/vsce as a dev dependency with a package script. Document the install flow and test the packaged extension.",
+        "details": "Set up VSIX packaging for distribution:\n\n1. **Update package.json** - add vsce and packaging scripts:\n   ```json\n   {\n     \"scripts\": {\n       \"compile\": \"tsc -p ./\",\n       \"watch\": \"tsc -watch -p ./\",\n       \"package\": \"npm run compile && vsce package\",\n       \"vscode:prepublish\": \"npm run compile\"\n     },\n     \"devDependencies\": {\n       \"@types/node\": \"^20.0.0\",\n       \"@types/vscode\": \"^1.85.0\",\n       \"@vscode/vsce\": \"^3.0.0\",\n       \"typescript\": \"^5.3.0\"\n     }\n   }\n   ```\n\n2. **Verify .vscodeignore** includes (already present, verify):\n   ```\n   src/\n   tsconfig.json\n   .gitignore\n   node_modules/\n   .taskmaster/\n   *.md\n   ```\n\n3. **Ensure package.json has required fields**:\n   - `publisher`: Already set to \"smallcase\"\n   - `repository`: Add if missing for marketplace\n   - `license`: Add \"MIT\" or appropriate license\n   - `icon`: Optional - add an extension icon\n\n4. **Update README.md installation section** (already documented):\n   ```bash\n   # From the extension directory\n   npm run package\n   code --install-extension agent-review-0.1.0.vsix\n   ```\n\n5. **Add repository field** (optional but recommended):\n   ```json\n   \"repository\": {\n     \"type\": \"git\",\n     \"url\": \"https://github.com/smallcase/agent-reviews.git\"\n   }\n   ```\n\n6. **Run packaging**:\n   ```bash\n   npm install\n   npm run package\n   ```",
+        "testStrategy": "1. Run `npm run package` - should create agent-review-0.1.0.vsix\n2. Open a fresh VSCode window (not Extension Development Host)\n3. Install: `code --install-extension agent-review-0.1.0.vsix`\n4. Open a workspace with .reviews/ directory containing a review file\n5. Verify extension activates (check Extension Host output)\n6. Verify commands appear in Command Palette\n7. Verify inline comments display correctly\n8. Verify edit/delete/severity change actions work\n9. Uninstall and reinstall to test clean installation",
+        "priority": "medium",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "6",
+        "title": "Update Code-Review-Excellence Skill Output Path",
+        "description": "Document how to update the Claude Code /code-review-excellence skill to save review files directly to the target project's .reviews/ directory.",
+        "details": "The /code-review-excellence skill currently saves to /tmp/. Document how users can configure it:\n\n1. **Add section to README.md**:\n   ```markdown\n   ## Integrating with Claude Code's /code-review-excellence skill\n\n   By default, the skill saves review files to `/tmp/`. To have reviews automatically loaded:\n\n   ### Option 1: Move the file after generation\n   After running `/code-review-excellence` on a PR, move the generated file:\n   ```bash\n   mv /tmp/pr-<number>-review-comments.json .reviews/\n   ```\n\n   ### Option 2: Configure the skill output path\n   If you have access to customize the skill, update the output path:\n   ```typescript\n   const outputPath = path.join(projectRoot, '.reviews', `pr-${prNumber}-review-comments.json`);\n   ```\n\n   ### Option 3: Use a symlink (development)\n   ```bash\n   ln -s /tmp/pr-*-review-comments.json .reviews/\n   ```\n   ```\n\n2. **If skill source is accessible**, the recommended change is:\n   - Detect if `.reviews/` directory exists in the workspace\n   - If yes, save directly there\n   - If no, fall back to `/tmp/` with a message suggesting to create `.reviews/`\n\n3. **Add helper command** (optional enhancement):\n   ```typescript\n   // In extension.ts - add command to import from /tmp/\n   context.subscriptions.push(\n     vscode.commands.registerCommand('agentReview.importFromTmp', async () => {\n       const tmpFiles = await vscode.workspace.findFiles('/tmp/pr-*-review-comments.json');\n       // Show picker, copy selected file to .reviews/\n     })\n   );\n   ```",
+        "testStrategy": "1. Run /code-review-excellence skill on a test PR\n2. Note where file is saved (should be /tmp/)\n3. Follow documented steps to move file to .reviews/\n4. Verify extension picks up the file automatically\n5. If skill can be modified: update output path, verify direct save to .reviews/",
+        "priority": "low",
+        "dependencies": [],
+        "status": "cancelled",
+        "subtasks": [],
+        "updatedAt": "2026-03-25T11:32:16.728Z"
+      },
+      {
+        "id": "7",
+        "title": "Add TypeScript Strict Null Checks",
+        "description": "Enable strictNullChecks in tsconfig.json and fix any resulting type errors to improve code robustness.",
+        "details": "The tsconfig.json has `strict: true` which includes strictNullChecks. Verify all code handles nullable types properly:\n\n1. **Audit nullable returns** - Functions that may return undefined:\n   - `getWorkspaceRoot()`: returns `string | undefined`\n   - `getReviewsDir()`: returns `string | undefined`\n   - `resolveCommentUri()`: returns `vscode.Uri | undefined`\n\n2. **Check array access** - Ensure bounds checking:\n   - `this.review.comments[comment.commentIndex]` - verify index validity\n   - `entries[0]` - verify array not empty\n\n3. **Fix potential issues in comments.ts**:\n   ```typescript\n   // Line 79-82 - add null check\n   const source = this.review.comments[comment.commentIndex];\n   if (!source) {\n     console.warn(`Comment index ${comment.commentIndex} not found`);\n     return;\n   }\n   source.body = newBody;\n   ```\n\n4. **Fix extension.ts watcher callback**:\n   ```typescript\n   // Line 116 - filename already null-checked, but TypeScript may not narrow\n   const changedFile = path.join(reviewsDir, filename); // Remove !\n   ```\n\n5. **Run compilation** to catch any remaining issues:\n   ```bash\n   npm run compile\n   ```",
+        "testStrategy": "1. Run `npm run compile` with no errors\n2. Test edge cases: load empty review file (no comments)\n3. Test with review file where comment has invalid index\n4. Test with workspace that has no .reviews/ directory\n5. Test file watcher with rapid file changes",
+        "priority": "low",
+        "dependencies": [
+          "2"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "8",
+        "title": "Add Error Recovery for Corrupted JSON",
+        "description": "Improve error handling when review JSON files are malformed or corrupted during editing.",
+        "details": "Add graceful error handling for JSON parsing failures:\n\n1. **Enhance parseReviewFile in parser.ts**:\n   ```typescript\n   export async function parseReviewFile(filePath: string): Promise<ReviewFile> {\n     const content = await fs.promises.readFile(filePath, 'utf-8');\n     \n     let data: unknown;\n     try {\n       data = JSON.parse(content);\n     } catch (e) {\n       throw new Error(`Invalid JSON in ${path.basename(filePath)}: ${e.message}`);\n     }\n\n     // Validate structure\n     if (!data || typeof data !== 'object') {\n       throw new Error(`Review file must be a JSON object`);\n     }\n     \n     const review = data as Record<string, unknown>;\n     \n     if (!review.pr || typeof review.pr !== 'object') {\n       throw new Error(`Missing or invalid 'pr' field`);\n     }\n     \n     if (!Array.isArray(review.comments)) {\n       throw new Error(`Missing or invalid 'comments' array`);\n     }\n     \n     // Validate each comment\n     for (let i = 0; i < review.comments.length; i++) {\n       const c = review.comments[i];\n       if (!c.path || typeof c.line !== 'number' || !c.body) {\n         throw new Error(`Invalid comment at index ${i}: needs path, line, body`);\n       }\n       // Default severity if missing\n       if (!c.severity) c.severity = 'nit';\n       // Default side if missing\n       if (!c.side) c.side = 'RIGHT';\n     }\n     \n     return data as ReviewFile;\n   }\n   ```\n\n2. **Add backup before save in saveReviewFile**:\n   ```typescript\n   export async function saveReviewFile(filePath: string, review: ReviewFile): Promise<void> {\n     const content = JSON.stringify(review, null, 2);\n     \n     // Validate JSON can be re-parsed (sanity check)\n     JSON.parse(content);\n     \n     await fs.promises.writeFile(filePath, content, 'utf-8');\n   }\n   ```\n\n3. **Show actionable error messages** in extension.ts:\n   ```typescript\n   catch (err: unknown) {\n     const errorMessage = err instanceof Error ? err.message : String(err);\n     const action = await vscode.window.showErrorMessage(\n       `Agent Review: ${errorMessage}`,\n       'Open File'\n     );\n     if (action === 'Open File') {\n       vscode.window.showTextDocument(vscode.Uri.file(filePath));\n     }\n   }\n   ```",
+        "testStrategy": "1. Create a malformed JSON file (missing closing brace) - should show clear error\n2. Create review with missing 'pr' field - should show specific error\n3. Create review with comment missing 'body' - should show index of bad comment\n4. Save valid review, verify file is valid JSON\n5. Test 'Open File' action in error message",
+        "priority": "low",
+        "dependencies": [
+          "2"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "9",
+        "title": "Add Multi-Review Support",
+        "description": "Allow loading multiple review files simultaneously and switching between them via quick pick.",
+        "details": "Currently only one review can be loaded at a time. Add support for multiple reviews:\n\n1. **Extend ReviewCommentController** to support multiple reviews:\n   ```typescript\n   private reviews: Map<string, {\n     review: ReviewFile;\n     threads: vscode.CommentThread[];\n   }> = new Map();\n   \n   private activeReviewPath: string | undefined;\n   ```\n\n2. **Add command to switch reviews**:\n   ```json\n   {\n     \"command\": \"agentReview.switchReview\",\n     \"title\": \"Agent Review: Switch Review...\"\n   }\n   ```\n\n3. **Implement review switching**:\n   ```typescript\n   context.subscriptions.push(\n     vscode.commands.registerCommand('agentReview.switchReview', async () => {\n       const reviewsDir = getReviewsDir();\n       if (!reviewsDir) return;\n       \n       const files = await findReviewFiles(reviewsDir);\n       if (files.length === 0) {\n         vscode.window.showInformationMessage('No review files found');\n         return;\n       }\n       \n       const items = files.map(f => ({\n         label: path.basename(f),\n         description: f === currentFilePath ? '(current)' : '',\n         path: f\n       }));\n       \n       const selected = await vscode.window.showQuickPick(items, {\n         placeHolder: 'Select review to load'\n       });\n       \n       if (selected) {\n         loadComments(selected.path, context.extensionUri);\n       }\n     })\n   );\n   ```\n\n4. **Update status bar** to show which review is active and allow quick switching:\n   ```typescript\n   statusBarItem.command = {\n     command: 'agentReview.switchReview',\n     title: 'Switch Review'\n   };\n   ```",
+        "testStrategy": "1. Place multiple review files in .reviews/ directory\n2. Load first review - verify comments appear\n3. Run 'Switch Review' command - verify picker shows all reviews\n4. Select different review - verify comments switch\n5. Status bar should update to show new review\n6. Previous review's comments should be cleared",
+        "priority": "low",
+        "dependencies": [
+          "4"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "10",
+        "title": "Add Keyboard Shortcuts",
+        "description": "Add keyboard shortcuts for common actions like reload, clear, and post to GitHub.",
+        "details": "Add keybindings for frequently used commands:\n\n1. **Add keybindings to package.json**:\n   ```json\n   \"contributes\": {\n     \"keybindings\": [\n       {\n         \"command\": \"agentReview.reload\",\n         \"key\": \"ctrl+shift+r\",\n         \"mac\": \"cmd+shift+r\",\n         \"when\": \"editorTextFocus\"\n       },\n       {\n         \"command\": \"agentReview.clear\",\n         \"key\": \"ctrl+shift+c\",\n         \"mac\": \"cmd+shift+c\",\n         \"when\": \"editorTextFocus\"\n       },\n       {\n         \"command\": \"agentReview.postToGitHub\",\n         \"key\": \"ctrl+shift+g\",\n         \"mac\": \"cmd+shift+g\",\n         \"when\": \"editorTextFocus\"\n       },\n       {\n         \"command\": \"agentReview.loadFile\",\n         \"key\": \"ctrl+shift+l\",\n         \"mac\": \"cmd+shift+l\"\n       }\n     ]\n   }\n   ```\n\n2. **Add when clause context** for better keybinding scoping:\n   ```typescript\n   // In loadComments, set context when review is loaded\n   vscode.commands.executeCommand(\n     'setContext', \n     'agentReview.hasReview', \n     true\n   );\n   \n   // In clear command\n   vscode.commands.executeCommand(\n     'setContext', \n     'agentReview.hasReview', \n     false\n   );\n   ```\n\n3. **Update keybindings to use context**:\n   ```json\n   {\n     \"command\": \"agentReview.reload\",\n     \"key\": \"ctrl+shift+r\",\n     \"mac\": \"cmd+shift+r\",\n     \"when\": \"agentReview.hasReview\"\n   }\n   ```\n\n4. **Document shortcuts in README**:\n   ```markdown\n   ## Keyboard Shortcuts\n   \n   | Command | Windows/Linux | Mac |\n   |---------|---------------|-----|\n   | Reload Comments | Ctrl+Shift+R | Cmd+Shift+R |\n   | Clear All | Ctrl+Shift+C | Cmd+Shift+C |\n   | Post to GitHub | Ctrl+Shift+G | Cmd+Shift+G |\n   | Load Review File | Ctrl+Shift+L | Cmd+Shift+L |\n   ```",
+        "testStrategy": "1. Load a review file\n2. Press Cmd+Shift+R (Mac) / Ctrl+Shift+R (Windows) - should reload\n3. Press Cmd+Shift+C - should clear comments\n4. Load review again, press Cmd+Shift+G - should prompt to post to GitHub\n5. With no review loaded, shortcuts for reload/clear/post should not trigger\n6. Cmd+Shift+L should always open file picker",
+        "priority": "low",
+        "dependencies": [
+          "3",
+          "4"
+        ],
+        "status": "pending",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "version": "1.0.0",
+      "lastModified": "2026-03-25T11:34:16.289Z",
+      "taskCount": 10,
+      "completedCount": 0,
+      "tags": [
+        "master"
+      ]
+    }
+  }
+}

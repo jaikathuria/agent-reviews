@@ -1,0 +1,99 @@
+{
+  "name": "agent-review",
+  "displayName": "Agent Review",
+  "description": "Displays AI-generated code review comments inline using the VSCode Comments API",
+  "version": "0.1.0",
+  "publisher": "smallcase",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:.reviews/pr-*-review-comments.json"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentReview.reload",
+        "title": "Agent Review: Reload Comments"
+      },
+      {
+        "command": "agentReview.clear",
+        "title": "Agent Review: Clear All Comments"
+      },
+      {
+        "command": "agentReview.loadFile",
+        "title": "Agent Review: Load Review File..."
+      },
+      {
+        "command": "agentReview.deleteComment",
+        "title": "Delete Comment",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "agentReview.editComment",
+        "title": "Edit Comment",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "agentReview.saveComment",
+        "title": "Save",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agentReview.cancelEdit",
+        "title": "Cancel",
+        "icon": "$(close)"
+      },
+      {
+        "command": "agentReview.changeSeverity",
+        "title": "Change Severity",
+        "icon": "$(tag)"
+      }
+    ],
+    "menus": {
+      "comments/comment/title": [
+        {
+          "command": "agentReview.editComment",
+          "when": "comment == agentReview && commentController == agent-review-comments",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentReview.changeSeverity",
+          "when": "comment == agentReview && commentController == agent-review-comments",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentReview.deleteComment",
+          "when": "comment == agentReview && commentController == agent-review-comments",
+          "group": "inline@3"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "agentReview.saveComment",
+          "when": "comment == agentReviewEditing && commentController == agent-review-comments",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentReview.cancelEdit",
+          "when": "comment == agentReviewEditing && commentController == agent-review-comments",
+          "group": "inline@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/vscode": "^1.85.0",
+    "task-master-ai": "^0.43.0",
+    "typescript": "^5.3.0"
+  }
+}
