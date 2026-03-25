@@ -20,6 +20,7 @@ let controller: ReviewCommentController | undefined;
 let currentFilePath: string | undefined;
 let fileWatcher: fs.FSWatcher | undefined;
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+let statusBarItem: vscode.StatusBarItem | undefined;
 
 function getWorkspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -79,6 +80,14 @@ async function loadComments(
       message += ` [${skipped} skipped — files not found]`;
     }
     vscode.window.showInformationMessage(message);
+
+    // Update status bar
+    if (statusBarItem) {
+      const icon = review.summary.verdict === "APPROVE" ? "$(check)" : "$(comment-discussion)";
+      statusBarItem.text = `${icon} PR #${review.pr.number}: ${verdictLabel} (${loaded})`;
+      statusBarItem.tooltip = `${review.pr.title}\nClick to reload`;
+      statusBarItem.show();
+    }
   } catch (err: unknown) {
     const errorMessage =
       err instanceof Error ? err.message : String(err);
@@ -129,6 +138,14 @@ export function activate(context: vscode.ExtensionContext): void {
   controller = new ReviewCommentController();
   context.subscriptions.push({ dispose: () => controller?.dispose() });
 
+  // Status bar item — clicking reloads comments
+  statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    100
+  );
+  statusBarItem.command = "agentReview.reload";
+  context.subscriptions.push(statusBarItem);
+
   // --- GitHub integration ---
   registerGitHubCommands(context, () => controller?.getReview());
 
@@ -150,6 +167,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentReview.clear", () => {
       controller?.clearAll();
       currentFilePath = undefined;
+      statusBarItem?.hide();
       vscode.window.showInformationMessage(
         "Agent Review: All comments cleared"
       );
