@@ -73,15 +73,27 @@ export async function saveReviewFile(
   await fs.promises.writeFile(filePath, JSON.stringify(review, null, 2), "utf-8");
 }
 
+export function getRepoSlug(repo: string): string {
+  const repoName = repo.includes("/") ? repo.split("/").pop()! : repo;
+  return repoName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+const REVIEW_FILENAME = /^[a-z0-9]+-(?:[a-z0-9]+-)*pr-\d+-review-comments\.json$/;
+
+export function isReviewFilename(filename: string): boolean {
+  return REVIEW_FILENAME.test(filename);
+}
+
 export async function findReviewFiles(
   reviewsDir: string
 ): Promise<string[]> {
   try {
     const entries = await fs.promises.readdir(reviewsDir);
     return entries
-      .filter(
-        (f) => f.startsWith("pr-") && f.endsWith("-review-comments.json")
-      )
+      .filter((f) => isReviewFilename(f))
       .map((f) => path.join(reviewsDir, f));
   } catch {
     return [];

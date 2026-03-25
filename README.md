@@ -41,13 +41,14 @@ echo '.reviews/' >> .gitignore
 
 ### Automatic loading
 
-Place a review file matching `pr-*-review-comments.json` in your project's `.reviews/` directory. The extension activates automatically and loads comments inline.
+Place a review file matching `<repo-slug>-pr-<number>-review-comments.json` in your project's `.reviews/` directory. The extension activates automatically and loads comments inline.
 
 ### Commands
 
 - **Agent Review: Load Review File...** — open a file picker to load any review JSON
 - **Agent Review: Reload Comments** — refresh from the current review file
 - **Agent Review: Clear All Comments** — remove all inline comments
+- **Agent Review: Generate Agent Instructions** — create an instructions file for AI agents in your project (supports CLAUDE.md, Cursor rules, Copilot instructions, or custom path)
 
 ### Inline comment actions
 
@@ -65,12 +66,20 @@ The extension watches `.reviews/` for changes. When a review file is created or 
 
 ## Review JSON Schema
 
+A formal JSON Schema 2020-12 definition is available at [`schema.json`](schema.json). For IDE autocomplete and validation, add to your review JSON:
+
+```json
+{ "$schema": "./path/to/agent-reviews/schema.json", ... }
+```
+
 ### File naming
 
-Files must be named `pr-<number>-review-comments.json` and placed in `.reviews/` at the workspace root. Examples:
+Files should be named `<repo-slug>-pr-<number>-review-comments.json` and placed in `.reviews/` at the workspace root. The repo slug is derived from `pr.repo` (the part after `/`, lowercased, special characters replaced with hyphens).
 
-- `.reviews/pr-58-review-comments.json`
-- `.reviews/pr-123-review-comments.json`
+| `pr.repo` | File name |
+|-----------|-----------|
+| `acme/backend-api` | `backend-api-pr-58-review-comments.json` |
+| `acme/frontend_app` | `frontend-app-pr-123-review-comments.json` |
 
 ### Full example
 
@@ -201,3 +210,74 @@ The extension applies these rules when loading a review file:
 - Comments missing `path`, `line`, or `body` are silently skipped (other comments still load)
 - Comments referencing files that don't exist locally are skipped with a count shown in the info message
 - `severity` defaults to `nit` styling if an unrecognized value is used
+
+## For AI Agents
+
+This section explains how to set up AI coding assistants (Claude Code, Cursor, Copilot, etc.) to generate review files that this extension can display.
+
+### Quick reference
+
+| Item | Value |
+|------|-------|
+| File location | `.reviews/` directory at workspace root |
+| File naming | `<repo-slug>-pr-<number>-review-comments.json` |
+| Schema | [`schema.json`](schema.json) (JSON Schema 2020-12) |
+| Full format spec | [`agent-instructions.md`](agent-instructions.md) |
+
+### Setup
+
+Run the command **Agent Review: Generate Agent Instructions** from the Command Palette. It will ask where to place the instructions in your project:
+
+- **CLAUDE.md** (append) — for Claude Code
+- **.cursor/rules/** (create) — for Cursor
+- **.github/copilot-instructions.md** (append) — for GitHub Copilot
+- **Custom path** — save anywhere
+
+Alternatively, copy [`agent-instructions.md`](agent-instructions.md) from this repository into your project manually.
+
+### Multi-repo workspaces
+
+For monorepos with submodules, the repo-slug prefix prevents PR number collisions:
+
+```
+my-monorepo/
+├── .reviews/
+│   ├── auth-service-pr-58-review-comments.json
+│   ├── payments-api-pr-58-review-comments.json
+│   └── web-frontend-pr-123-review-comments.json
+├── services/
+│   ├── auth/       # submodule: acme/auth-service
+│   └── payments/   # submodule: acme/payments-api
+└── apps/
+    └── web/        # submodule: acme/web-frontend
+```
+
+The extension resolves comment `path` fields via `.gitmodules`. A comment with `"path": "src/auth.ts"` in `auth-service-pr-58-review-comments.json` resolves to `services/auth/src/auth.ts`.
+
+### Minimal valid review
+
+```json
+{
+  "pr": {
+    "repo": "org/repo-name",
+    "number": 123,
+    "title": "PR title",
+    "base": "main",
+    "head": "feature-branch"
+  },
+  "summary": {
+    "verdict": "COMMENT",
+    "overview": "Brief summary of the review.",
+    "strengths": []
+  },
+  "comments": [
+    {
+      "path": "src/file.ts",
+      "line": 42,
+      "side": "RIGHT",
+      "severity": "suggestion",
+      "body": "Comment text in Markdown."
+    }
+  ]
+}
+```

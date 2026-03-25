@@ -3,7 +3,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 
 interface SubmoduleMap {
-  [repoSlug: string]: string; // e.g. "smallcase/las-be-distribution" -> "distribution"
+  [repoSlug: string]: string; // e.g. "acme/backend-api" -> "services/backend"
 }
 
 /**

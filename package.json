@@ -4,6 +4,15 @@
   "description": "Displays AI-generated code review comments inline using the VSCode Comments API",
   "version": "0.1.0",
   "publisher": "smallcase",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaikathuria/agent-reviews.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jaikathuria/agent-reviews/issues"
+  },
+  "homepage": "https://github.com/jaikathuria/agent-reviews#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -11,7 +20,7 @@
     "Other"
   ],
   "activationEvents": [
-    "workspaceContains:.reviews/pr-*-review-comments.json"
+    "workspaceContains:.reviews/*-pr-*-review-comments.json"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -61,6 +70,10 @@
       {
         "command": "agentReview.switchReview",
         "title": "Agent Review: Switch Review File"
+      },
+      {
+        "command": "agentReview.generateAgentInstructions",
+        "title": "Agent Review: Generate Agent Instructions"
       }
     ],
     "keybindings": [

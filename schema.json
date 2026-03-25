@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jaikathuria/agent-reviews/schema.json",
+  "title": "Agent Review File",
+  "description": "Schema for AI-generated code review comments displayed by the agent-reviews VSCode extension.",
+  "type": "object",
+  "required": ["pr", "summary", "comments"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for IDE autocomplete."
+    },
+    "pr": {
+      "type": "object",
+      "description": "Pull request metadata.",
+      "required": ["repo", "number", "title", "base", "head"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "GitHub repository in org/repo format.",
+          "examples": ["acme/backend-api"]
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Pull request number."
+        },
+        "title": {
+          "type": "string",
+          "description": "Pull request title."
+        },
+        "base": {
+          "type": "string",
+          "description": "Base branch the PR targets.",
+          "examples": ["main"]
+        },
+        "head": {
+          "type": "string",
+          "description": "Head branch of the PR.",
+          "examples": ["fix/handle-null-response"]
+        }
+      }
+    },
+    "author": {
+      "$ref": "#/$defs/ReviewAuthor",
+      "description": "Default author for all comments. Individual comments can override this."
+    },
+    "summary": {
+      "type": "object",
+      "description": "Review summary with verdict and overview.",
+      "required": ["verdict", "overview", "strengths"],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+          "description": "Review verdict. APPROVE: ready to merge. REQUEST_CHANGES: has blocking/important issues. COMMENT: observations without a strong stance."
+        },
+        "overview": {
+          "type": "string",
+          "description": "One-paragraph summary of the review findings."
+        },
+        "strengths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of positive aspects noted in the code. Can be empty."
+        }
+      }
+    },
+    "comments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ReviewComment" },
+      "description": "Array of inline review comments attached to specific file:line locations."
+    }
+  },
+  "$defs": {
+    "Severity": {
+      "type": "string",
+      "enum": ["blocking", "important", "suggestion", "nit", "praise", "learning"],
+      "description": "Comment severity level. blocking: must fix. important: should fix. suggestion: consider alternative. nit: minor/style. praise: positive feedback. learning: educational context."
+    },
+    "ReviewAuthor": {
+      "type": "object",
+      "description": "Author information displayed in comment headers.",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name shown in the comment header.",
+          "examples": ["Claude Opus 4"]
+        },
+        "iconUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to an avatar image displayed next to the author name."
+        }
+      }
+    },
+    "ReviewComment": {
+      "type": "object",
+      "description": "A single review comment attached to a file and line number.",
+      "required": ["path", "line", "side", "severity", "body"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path relative to the repository root, matching the path shown in the PR diff.",
+          "examples": ["src/handlers/users.ts"]
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based line number where the comment is anchored."
+        },
+        "side": {
+          "type": "string",
+          "enum": ["LEFT", "RIGHT"],
+          "description": "RIGHT for new/added code (most common). LEFT for commenting on deleted lines."
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "body": {
+          "type": "string",
+          "description": "Comment text in Markdown format."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when the comment was created."
+        },
+        "author": {
+          "$ref": "#/$defs/ReviewAuthor",
+          "description": "Per-comment author override. Falls back to the top-level author if omitted."
+        }
+      }
+    }
+  }
+}

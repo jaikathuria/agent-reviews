@@ -6,3 +6,7 @@ node_modules/
 .taskmaster/
 .vscode/
 *.vsix
+.github/
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+CLAUDE.md

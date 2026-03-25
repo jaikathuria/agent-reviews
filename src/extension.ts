@@ -2,10 +2,11 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 
-import { parseReviewFile, findReviewFiles, Severity } from "./parser";
+import { parseReviewFile, findReviewFiles, isReviewFilename, Severity } from "./parser";
 import { parseGitmodules } from "./resolver";
 import { ReviewCommentController, AgentReviewComment } from "./comments";
 import { registerGitHubCommands } from "./github";
+import { registerGenerateInstructionsCommand } from "./generate-instructions";
 
 const ALL_SEVERITIES: { label: string; value: Severity }[] = [
   { label: "$(error) Blocking", value: "blocking" },
@@ -107,11 +108,7 @@ function watchReviewsDir(
 
   try {
     fileWatcher = fs.watch(reviewsDir, (_event: string, filename: string | null) => {
-      if (
-        !filename ||
-        !filename.startsWith("pr-") ||
-        !filename.endsWith("-review-comments.json")
-      ) {
+      if (!filename || !isReviewFilename(filename)) {
         return;
       }
 
@@ -148,6 +145,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // --- GitHub integration ---
   registerGitHubCommands(context, () => controller?.getReview());
+
+  // --- Agent instructions ---
+  registerGenerateInstructionsCommand(context);
 
   // --- Existing commands ---
 
