@@ -51,13 +51,17 @@ export async function parseReviewFile(filePath: string): Promise<ReviewFile> {
     );
   }
 
-  for (const comment of data.comments) {
+  // Filter out malformed comments instead of failing the whole load
+  data.comments = data.comments.filter((comment: Record<string, unknown>) => {
     if (!comment.path || typeof comment.line !== "number" || !comment.body) {
-      throw new Error(
-        `Invalid comment in ${filePath}: each comment needs path, line, and body`
+      console.warn(
+        `[agent-review] Skipping malformed comment in ${filePath}:`,
+        JSON.stringify(comment).slice(0, 100)
       );
+      return false;
     }
-  }
+    return true;
+  });
 
   return data as ReviewFile;
 }
