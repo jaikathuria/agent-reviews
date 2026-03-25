@@ -184,7 +184,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "agentReview.editComment",
-      (comment: AgentReviewComment, thread: vscode.CommentThread) => {
+      (comment: AgentReviewComment, thread?: vscode.CommentThread) => {
         if (!controller) {
           return;
         }
@@ -197,7 +197,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "agentReview.saveComment",
-      async (comment: AgentReviewComment, thread: vscode.CommentThread) => {
+      async (comment: AgentReviewComment) => {
         if (!controller) {
           return;
         }
@@ -215,7 +215,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "agentReview.cancelEdit",
-      (comment: AgentReviewComment, thread: vscode.CommentThread) => {
+      (comment: AgentReviewComment, thread?: vscode.CommentThread) => {
         if (!controller) {
           return;
         }

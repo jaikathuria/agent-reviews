@@ -14,6 +14,7 @@ interface SubmoduleMap {
  */
 export interface AgentReviewComment extends vscode.Comment {
   commentIndex: number;
+  threadRef?: vscode.CommentThread;
 }
 
 export class ReviewCommentController {
@@ -98,15 +99,20 @@ export class ReviewCommentController {
     await this.persistAndRebuild();
   }
 
-  setCommentEditing(comment: AgentReviewComment, thread: vscode.CommentThread): void {
+  setCommentEditing(comment: AgentReviewComment, thread?: vscode.CommentThread): void {
+    const t = thread || comment.threadRef;
+    if (!t) {
+      return;
+    }
     comment.mode = vscode.CommentMode.Editing;
     comment.contextValue = "agentReviewEditing";
     // Trigger UI refresh by reassigning the comments array
-    thread.comments = [...thread.comments];
+    t.comments = [...t.comments];
   }
 
-  cancelEdit(comment: AgentReviewComment, thread: vscode.CommentThread): void {
-    if (!this.review) {
+  cancelEdit(comment: AgentReviewComment, thread?: vscode.CommentThread): void {
+    const t = thread || comment.threadRef;
+    if (!t || !this.review) {
       return;
     }
     // Restore body from source
@@ -116,7 +122,7 @@ export class ReviewCommentController {
     }
     comment.mode = vscode.CommentMode.Preview;
     comment.contextValue = "agentReview";
-    thread.comments = [...thread.comments];
+    t.comments = [...t.comments];
   }
 
   clearAll(): void {
@@ -226,6 +232,11 @@ export class ReviewCommentController {
       );
       thread.canReply = false;
       thread.contextValue = "agentReviewThread";
+
+      // Store thread reference on each comment for use in commands
+      for (const vc of vsComments) {
+        vc.threadRef = thread;
+      }
 
       // Show author name as thread title
       const author = entries[0].comment.author || this.review?.author;
