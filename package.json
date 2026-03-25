@@ -52,6 +52,11 @@
         "command": "agentReview.changeSeverity",
         "title": "Change Severity",
         "icon": "$(tag)"
+      },
+      {
+        "command": "agentReview.postToGitHub",
+        "title": "Agent Review: Post Review to GitHub",
+        "icon": "$(github)"
       }
     ],
     "menus": {

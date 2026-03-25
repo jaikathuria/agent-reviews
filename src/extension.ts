@@ -5,6 +5,7 @@ import * as path from "path";
 import { parseReviewFile, findReviewFiles, Severity } from "./parser";
 import { parseGitmodules } from "./resolver";
 import { ReviewCommentController, AgentReviewComment } from "./comments";
+import { registerGitHubCommands } from "./github";
 
 const ALL_SEVERITIES: { label: string; value: Severity }[] = [
   { label: "$(error) Blocking", value: "blocking" },
@@ -127,6 +128,9 @@ function watchReviewsDir(
 export function activate(context: vscode.ExtensionContext): void {
   controller = new ReviewCommentController();
   context.subscriptions.push({ dispose: () => controller?.dispose() });
+
+  // --- GitHub integration ---
+  registerGitHubCommands(context, () => controller?.getReview());
 
   // --- Existing commands ---
 

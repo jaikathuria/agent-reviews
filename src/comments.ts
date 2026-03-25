@@ -125,6 +125,10 @@ export class ReviewCommentController {
     t.comments = [...t.comments];
   }
 
+  getReview(): ReviewFile | undefined {
+    return this.review;
+  }
+
   clearAll(): void {
     for (const thread of this.threads) {
       thread.dispose();
