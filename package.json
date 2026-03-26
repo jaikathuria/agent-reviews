@@ -4,6 +4,7 @@
   "description": "Displays AI-generated code review comments inline using the VSCode Comments API",
   "version": "0.1.0",
   "publisher": "jaikathuria",
+  "icon": "icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
