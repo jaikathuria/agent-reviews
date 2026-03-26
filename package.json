@@ -119,29 +119,29 @@
       "comments/comment/title": [
         {
           "command": "agentReview.editComment",
-          "when": "comment == agentReview && commentController == agent-review-comments",
+          "when": "comment == agentReview && commentController =~ /^agent-review-/",
           "group": "inline@1"
         },
         {
           "command": "agentReview.changeSeverity",
-          "when": "comment == agentReview && commentController == agent-review-comments",
+          "when": "comment == agentReview && commentController =~ /^agent-review-/",
           "group": "inline@2"
         },
         {
           "command": "agentReview.deleteComment",
-          "when": "comment == agentReview && commentController == agent-review-comments",
+          "when": "comment == agentReview && commentController =~ /^agent-review-/",
           "group": "inline@3"
         }
       ],
       "comments/comment/context": [
         {
           "command": "agentReview.saveComment",
-          "when": "comment == agentReviewEditing && commentController == agent-review-comments",
+          "when": "comment == agentReviewEditing && commentController =~ /^agent-review-/",
           "group": "inline@1"
         },
         {
           "command": "agentReview.cancelEdit",
-          "when": "comment == agentReviewEditing && commentController == agent-review-comments",
+          "when": "comment == agentReviewEditing && commentController =~ /^agent-review-/",
           "group": "inline@2"
         }
       ]

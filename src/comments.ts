@@ -1,35 +1,36 @@
 import * as vscode from "vscode";
 
+import * as cp from "child_process";
+
 import { ReviewAuthor, ReviewComment, ReviewFile, Severity, saveReviewFile } from "./parser";
 import { resolveCommentUri } from "./resolver";
 import { getIconUri } from "./icons";
-import { buildGitUri } from "./diffProvider";
+import { buildGitHubApiUri } from "./diffProvider";
 
 interface SubmoduleMap {
   [repoSlug: string]: string;
 }
 
 /**
- * Extends vscode.Comment with a back-reference to the source ReviewComment index.
- * This lets us find and mutate the correct entry in ReviewFile.comments[].
+ * Extends vscode.Comment with a back-reference to the source ReviewComment index
+ * and the review file path for routing mutations to the correct controller.
  */
 export interface AgentReviewComment extends vscode.Comment {
   commentIndex: number;
   threadRef?: vscode.CommentThread;
+  reviewFilePath?: string;
 }
 
 export interface CommentedFileInfo {
   relativePath: string;
   fileUri: vscode.Uri;
-  baseUri: vscode.Uri;
 }
 
 export interface NavigationEntry {
   path: string;
   line: number;
   side: "LEFT" | "RIGHT";
-  fileUri: vscode.Uri;
-  baseUri: vscode.Uri;
+  reviewFilePath?: string;
 }
 
 export class ReviewCommentController {
@@ -47,7 +48,7 @@ export class ReviewCommentController {
   private fallbackTimestamp: Date | undefined;
   private gitRoot: string | undefined;
 
-  // Lookup map for lazy/reactive attachment (PR extension integration)
+  // Lookup map for grouping comments by file path
   private commentsByPath = new Map<string, {
     left: { comment: ReviewComment; index: number }[];
     right: { comment: ReviewComment; index: number }[];
@@ -59,14 +60,21 @@ export class ReviewCommentController {
   // Cached list of files with comments for navigation/diff opening
   private commentedFiles: CommentedFileInfo[] = [];
 
-  constructor() {
+  // Cached PR commit SHAs (fetched from GitHub API once per review load)
+  private prCommits: { baseCommit: string; headCommit: string } | undefined;
+
+  constructor(controllerId: string, label: string) {
     this.controller = vscode.comments.createCommentController(
-      "agent-review-comments",
-      "Agent Review"
+      controllerId,
+      label
     );
   }
 
-  loadReview(
+  getReviewFilePath(): string | undefined {
+    return this.reviewFilePath;
+  }
+
+  async loadReview(
     review: ReviewFile,
     workspaceRoot: string,
     submoduleMap: SubmoduleMap,
@@ -74,8 +82,9 @@ export class ReviewCommentController {
     fallbackTimestamp?: Date,
     reviewFilePath?: string,
     gitRoot?: string
-  ): { loaded: number; skipped: number } {
+  ): Promise<{ loaded: number; skipped: number }> {
     this.clearAll();
+    this.prCommits = undefined;
 
     this.review = review;
     this.reviewFilePath = reviewFilePath;
@@ -85,7 +94,15 @@ export class ReviewCommentController {
     this.fallbackTimestamp = fallbackTimestamp;
     this.gitRoot = gitRoot;
 
-    return this.rebuildThreads();
+    // Fetch PR commits from GitHub API for attaching comments to diff URIs
+    await this.fetchPRCommits();
+
+    const result = this.rebuildThreads();
+
+    // Pre-warm content cache in the background so diffs open instantly on click
+    this.preWarmContentCache();
+
+    return result;
   }
 
   // --- Mutation methods ---
@@ -136,7 +153,6 @@ export class ReviewCommentController {
     }
     comment.mode = vscode.CommentMode.Editing;
     comment.contextValue = "agentReviewEditing";
-    // Trigger UI refresh by reassigning the comments array
     t.comments = [...t.comments];
   }
 
@@ -145,7 +161,6 @@ export class ReviewCommentController {
     if (!t || !this.review) {
       return;
     }
-    // Restore body from source
     const source = this.review.comments[comment.commentIndex];
     if (source) {
       comment.body = new vscode.MarkdownString(source.body);
@@ -177,15 +192,31 @@ export class ReviewCommentController {
   // --- Diff & navigation methods ---
 
   /**
-   * Check if a relative path has review comments (used by diff-on-click).
+   * Returns the smallest comment line number for a given file path.
+   * Used as a fallback when the editor selection can't be trusted.
    */
+  getFirstCommentLine(relativePath: string): number | undefined {
+    const sides = this.commentsByPath.get(relativePath);
+    if (!sides) {
+      return undefined;
+    }
+    let minLine: number | undefined;
+    for (const entry of [...sides.right, ...sides.left]) {
+      if (minLine === undefined || entry.comment.line < minLine) {
+        minLine = entry.comment.line;
+      }
+    }
+    return minLine;
+  }
+
+  matchesRepo(repo: string): boolean {
+    return this.review?.pr.repo === repo;
+  }
+
   hasCommentsForPath(relativePath: string): boolean {
     return this.commentsByPath.has(relativePath);
   }
 
-  /**
-   * Get the relative path for a file URI within the workspace.
-   */
   getRelativePath(uri: vscode.Uri): string | undefined {
     if (!this.workspaceRoot || uri.scheme !== "file") {
       return undefined;
@@ -198,7 +229,6 @@ export class ReviewCommentController {
     if (rel.startsWith("/") || rel.startsWith("\\")) {
       rel = rel.slice(1);
     }
-    // Also strip submodule prefix to get the repo-relative path
     if (this.review) {
       const submodulePath = this.submoduleMap[this.review.pr.repo];
       if (submodulePath && rel.startsWith(submodulePath)) {
@@ -213,9 +243,11 @@ export class ReviewCommentController {
 
   /**
    * Opens a diff view for the given relative file path.
+   * Both sides fetched from GitHub API. Comments are already attached
+   * to the same URIs during rebuildThreads, so they appear in the diff.
    */
-  async openDiffForFile(relativePath: string): Promise<void> {
-    if (!this.review || !this.workspaceRoot || !this.gitRoot) {
+  async openDiffForFile(relativePath: string, line?: number): Promise<void> {
+    if (!this.review || !this.workspaceRoot || !this.gitRoot || !this.prCommits) {
       return;
     }
 
@@ -229,22 +261,37 @@ export class ReviewCommentController {
       return;
     }
 
-    const baseUri = buildGitUri(relativePath, this.review.pr.base, this.gitRoot);
+    const options: vscode.TextDocumentShowOptions = {};
+    if (line) {
+      options.selection = new vscode.Range(
+        Math.max(0, line - 1), 0,
+        Math.max(0, line - 1), 0
+      );
+    }
+
     const title = `${relativePath} (PR #${this.review.pr.number})`;
 
-    await vscode.commands.executeCommand("vscode.diff", baseUri, fileUri, title);
+    try {
+      const absolutePath = fileUri.fsPath;
+      const repo = this.review.pr.repo;
+      const baseUri = buildGitHubApiUri(relativePath, this.prCommits.baseCommit, repo, absolutePath);
+      const headUri = buildGitHubApiUri(relativePath, this.prCommits.headCommit, repo, absolutePath);
+
+      await Promise.all([
+        vscode.workspace.openTextDocument(baseUri),
+        vscode.workspace.openTextDocument(headUri),
+      ]);
+
+      await vscode.commands.executeCommand("vscode.diff", baseUri, headUri, title, options);
+    } catch {
+      // Cannot show diff
+    }
   }
 
-  /**
-   * Returns the list of files that have review comments, with their URIs.
-   */
   getCommentedFiles(): CommentedFileInfo[] {
     return this.commentedFiles;
   }
 
-  /**
-   * Returns a flat, sorted list of all comments for navigation.
-   */
   getNavigationList(): NavigationEntry[] {
     if (!this.review || !this.workspaceRoot || !this.gitRoot) {
       return [];
@@ -252,24 +299,12 @@ export class ReviewCommentController {
 
     const entries: NavigationEntry[] = [];
     for (const [relativePath, sides] of this.commentsByPath) {
-      const fileUri = resolveCommentUri(
-        this.workspaceRoot,
-        this.submoduleMap,
-        this.review.pr.repo,
-        relativePath
-      );
-      if (!fileUri) {
-        continue;
-      }
-      const baseUri = buildGitUri(relativePath, this.review.pr.base, this.gitRoot);
-
       for (const entry of sides.right) {
         entries.push({
           path: relativePath,
           line: entry.comment.line,
           side: "RIGHT",
-          fileUri,
-          baseUri,
+          reviewFilePath: this.reviewFilePath,
         });
       }
       for (const entry of sides.left) {
@@ -277,117 +312,79 @@ export class ReviewCommentController {
           path: relativePath,
           line: entry.comment.line,
           side: "LEFT",
-          fileUri,
-          baseUri,
+          reviewFilePath: this.reviewFilePath,
         });
       }
     }
 
-    // Sort by path, then line
-    entries.sort((a, b) => {
-      const pathCmp = a.path.localeCompare(b.path);
-      if (pathCmp !== 0) {
-        return pathCmp;
-      }
-      return a.line - b.line;
-    });
-
     return entries;
   }
 
-  /**
-   * Validates that a PR number and repo match the loaded review.
-   */
-  matchesPR(prNumber?: number, repoSlug?: string): boolean {
-    if (!this.review) {
-      return false;
-    }
-    if (prNumber !== undefined && prNumber !== this.review.pr.number) {
-      return false;
-    }
-    if (repoSlug !== undefined && repoSlug !== this.review.pr.repo) {
-      return false;
-    }
-    return true;
-  }
-
-  /**
-   * Lazily attach comments to a URI (used for PR extension `review:` scheme).
-   * Creates threads on the given URI for comments matching the path and side.
-   */
-  attachCommentsToUri(
-    uri: vscode.Uri,
-    relativePath: string,
-    side: "LEFT" | "RIGHT"
-  ): void {
-    if (!this.review || !this.extensionUri) {
-      return;
-    }
-
-    const pathComments = this.commentsByPath.get(relativePath);
-    if (!pathComments) {
-      return;
-    }
-
-    const entries = side === "LEFT" ? pathComments.left : pathComments.right;
-    if (entries.length === 0) {
-      return;
-    }
-
-    // Group entries by line for thread creation
-    const byLine = new Map<number, { comment: ReviewComment; index: number }[]>();
-    for (const entry of entries) {
-      const key = entry.comment.line;
-      const existing = byLine.get(key);
-      if (existing) {
-        existing.push(entry);
-      } else {
-        byLine.set(key, [entry]);
-      }
-    }
-
-    for (const [line, lineEntries] of byLine) {
-      const threadKey = `${uri.toString()}:${line}`;
-      if (this.attachedUris.has(threadKey)) {
-        continue;
-      }
-      this.attachedUris.add(threadKey);
-
-      const range = new vscode.Range(Math.max(0, line - 1), 0, Math.max(0, line - 1), 0);
-      const vsComments = this.buildVsComments(lineEntries);
-
-      const thread = this.controller.createCommentThread(uri, range, vsComments);
-      thread.canReply = false;
-      thread.contextValue = "agentReviewThread";
-
-      for (const vc of vsComments) {
-        vc.threadRef = thread;
-      }
-
-      const author = lineEntries[0].comment.author || this.review?.author;
-      if (author?.name) {
-        thread.label = author.name;
-      }
-
-      const severities = lineEntries.map((e) => e.comment.severity);
-      const hasHighSeverity = severities.some(
-        (s) => s === "blocking" || s === "important"
-      );
-      thread.collapsibleState = hasHighSeverity
-        ? vscode.CommentThreadCollapsibleState.Expanded
-        : vscode.CommentThreadCollapsibleState.Collapsed;
-
-      this.threads.push(thread);
-    }
-  }
-
   // --- Private helpers ---
+
+  /**
+   * Pre-fetch content for all commented files from GitHub API in background.
+   * This warms the GitContentProvider cache so diffs open instantly on click.
+   */
+  private preWarmContentCache(): void {
+    if (!this.prCommits || !this.review || !this.workspaceRoot) {
+      return;
+    }
+
+    const commits = this.prCommits;
+    const repo = this.review.pr.repo;
+    const uris: vscode.Uri[] = [];
+
+    for (const file of this.commentedFiles) {
+      const absolutePath = file.fileUri.fsPath;
+      uris.push(buildGitHubApiUri(file.relativePath, commits.headCommit, repo, absolutePath));
+      uris.push(buildGitHubApiUri(file.relativePath, commits.baseCommit, repo, absolutePath));
+    }
+
+    // Fire-and-forget: fetch all in parallel
+    Promise.allSettled(
+      uris.map((uri) => vscode.workspace.openTextDocument(uri))
+    ).catch(() => {
+      // Ignore errors — cache warming is best-effort
+    });
+  }
+
+  /**
+   * Fetch PR commit SHAs from GitHub API via `gh` CLI. Caches the result.
+   */
+  private fetchPRCommits(): Promise<{ baseCommit: string; headCommit: string } | undefined> {
+    if (this.prCommits) {
+      return Promise.resolve(this.prCommits);
+    }
+    if (!this.review) {
+      return Promise.resolve(undefined);
+    }
+    const { repo, number: prNumber } = this.review.pr;
+    return new Promise<{ baseCommit: string; headCommit: string } | undefined>((resolve) => {
+      cp.execFile(
+        "gh",
+        ["api", `repos/${repo}/pulls/${prNumber}`, "--jq", "{baseCommit: .base.sha, headCommit: .head.sha}"],
+        { timeout: 10000 },
+        (err: Error | null, stdout: string) => {
+          if (err) {
+            resolve(undefined);
+          } else {
+            try {
+              this.prCommits = JSON.parse(stdout.trim());
+              resolve(this.prCommits);
+            } catch {
+              resolve(undefined);
+            }
+          }
+        }
+      );
+    });
+  }
 
   private async persistAndRebuild(): Promise<void> {
     if (this.review && this.reviewFilePath) {
       this.isSaving = true;
       await saveReviewFile(this.reviewFilePath, this.review);
-      // Keep flag on briefly so the debounced watcher doesn't reload
       setTimeout(() => {
         this.isSaving = false;
       }, 1000);
@@ -396,7 +393,6 @@ export class ReviewCommentController {
   }
 
   private rebuildThreads(): { loaded: number; skipped: number } {
-    // Dispose existing threads
     for (const thread of this.threads) {
       thread.dispose();
     }
@@ -405,11 +401,7 @@ export class ReviewCommentController {
     this.attachedUris.clear();
     this.commentedFiles = [];
 
-    if (
-      !this.review ||
-      !this.workspaceRoot ||
-      !this.extensionUri
-    ) {
+    if (!this.review || !this.workspaceRoot || !this.extensionUri) {
       return { loaded: 0, skipped: 0 };
     }
 
@@ -433,7 +425,6 @@ export class ReviewCommentController {
     let loaded = 0;
     let skipped = 0;
 
-    // Build commented files list and create threads
     for (const [relativePath, sides] of this.commentsByPath) {
       const fileUri = resolveCommentUri(
         this.workspaceRoot,
@@ -450,24 +441,30 @@ export class ReviewCommentController {
         continue;
       }
 
-      // Store for navigation/diff opening
-      const baseUri = this.gitRoot
-        ? buildGitUri(relativePath, this.review.pr.base, this.gitRoot)
-        : fileUri;
-      this.commentedFiles.push({ relativePath, fileUri, baseUri });
+      this.commentedFiles.push({ relativePath, fileUri });
 
-      // Create threads for RIGHT-side comments on file: URIs
-      if (sides.right.length > 0) {
-        this.createThreadsForEntries(sides.right, fileUri);
-        loaded += sides.right.length;
-      }
+      // Attach threads to GitHub API URIs (matching what openDiffForFile uses)
+      if (this.prCommits) {
+        const absolutePath = fileUri.fsPath;
+        const repo = this.review.pr.repo;
 
-      // Create threads for LEFT-side comments on agent-review-git: URIs
-      if (sides.left.length > 0 && this.gitRoot) {
-        const leftUri = buildGitUri(relativePath, this.review.pr.base, this.gitRoot);
-        this.createThreadsForEntries(sides.left, leftUri);
-        loaded += sides.left.length;
+        if (sides.right.length > 0) {
+          const headUri = buildGitHubApiUri(relativePath, this.prCommits.headCommit, repo, absolutePath);
+          this.createThreadsForEntries(sides.right, headUri);
+          loaded += sides.right.length;
+        }
+
+        if (sides.left.length > 0) {
+          const baseUri = buildGitHubApiUri(relativePath, this.prCommits.baseCommit, repo, absolutePath);
+          this.createThreadsForEntries(sides.left, baseUri);
+          loaded += sides.left.length;
+        }
       } else {
+        // No PR commits available — attach to file: URIs as fallback
+        if (sides.right.length > 0) {
+          this.createThreadsForEntries(sides.right, fileUri);
+          loaded += sides.right.length;
+        }
         skipped += sides.left.length;
       }
     }
@@ -475,15 +472,10 @@ export class ReviewCommentController {
     return { loaded, skipped };
   }
 
-  /**
-   * Creates comment threads for a set of entries on a given URI,
-   * grouped by line number.
-   */
   private createThreadsForEntries(
     entries: { comment: ReviewComment; index: number }[],
     uri: vscode.Uri
   ): void {
-    // Group by line
     const byLine = new Map<number, { comment: ReviewComment; index: number }[]>();
     for (const entry of entries) {
       const key = entry.comment.line;
@@ -518,13 +510,7 @@ export class ReviewCommentController {
         thread.label = author.name;
       }
 
-      const severities = lineEntries.map((e) => e.comment.severity);
-      const hasHighSeverity = severities.some(
-        (s) => s === "blocking" || s === "important"
-      );
-      thread.collapsibleState = hasHighSeverity
-        ? vscode.CommentThreadCollapsibleState.Expanded
-        : vscode.CommentThreadCollapsibleState.Collapsed;
+      thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
 
       this.threads.push(thread);
     }
@@ -543,6 +529,7 @@ export class ReviewCommentController {
         label: c.severity.toUpperCase(),
         contextValue: "agentReview",
         commentIndex: entry.index,
+        reviewFilePath: this.reviewFilePath,
       };
       const ts = c.timestamp
         ? new Date(c.timestamp)
@@ -554,10 +541,6 @@ export class ReviewCommentController {
     });
   }
 
-  /**
-   * Resolves author info: per-comment author > review-level author > fallback.
-   * Uses severity icon as default; overrides with author iconUrl if provided.
-   */
   private resolveAuthor(
     comment: ReviewComment,
     extensionUri: vscode.Uri
@@ -565,7 +548,6 @@ export class ReviewCommentController {
     const author: ReviewAuthor | undefined =
       comment.author || this.review?.author;
 
-    // Author name is shown on the thread title, not per-comment
     const name = "";
     const iconPath = author?.iconUrl
       ? vscode.Uri.parse(author.iconUrl)

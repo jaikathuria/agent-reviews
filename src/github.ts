@@ -89,19 +89,39 @@ export async function postReviewToGitHub(
 
 /**
  * Registers the postToGitHub command.
+ * Accepts a function that returns all loaded reviews for selection.
  */
 export function registerGitHubCommands(
   context: vscode.ExtensionContext,
-  getReview: () => ReviewFile | undefined
+  getReviews: () => Map<string, { review: ReviewFile; filePath: string }>
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("agentReview.postToGitHub", async () => {
-      const review = getReview();
-      if (!review) {
+      const allReviews = getReviews();
+      if (allReviews.size === 0) {
         vscode.window.showWarningMessage(
-          "Agent Review: No review file loaded."
+          "Agent Review: No review files loaded."
         );
         return;
+      }
+
+      // Pick which review to post
+      let review: ReviewFile;
+      if (allReviews.size === 1) {
+        review = allReviews.values().next().value!.review;
+      } else {
+        const items = Array.from(allReviews.values()).map((entry) => ({
+          label: `PR #${entry.review.pr.number}: ${entry.review.pr.title}`,
+          description: `${entry.review.pr.repo} (${entry.review.comments.length} comments)`,
+          review: entry.review,
+        }));
+        const selected = await vscode.window.showQuickPick(items, {
+          placeHolder: "Select which review to post to GitHub",
+        });
+        if (!selected) {
+          return;
+        }
+        review = selected.review;
       }
 
       const confirm = await vscode.window.showWarningMessage(
