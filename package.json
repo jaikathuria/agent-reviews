@@ -75,6 +75,18 @@
       {
         "command": "agentReview.generateAgentInstructions",
         "title": "Agent Review: Generate Agent Instructions"
+      },
+      {
+        "command": "agentReview.openFileDiff",
+        "title": "Agent Review: Open File Diff"
+      },
+      {
+        "command": "agentReview.nextComment",
+        "title": "Agent Review: Next Comment"
+      },
+      {
+        "command": "agentReview.previousComment",
+        "title": "Agent Review: Previous Comment"
       }
     ],
     "keybindings": [
@@ -92,35 +104,45 @@
         "command": "agentReview.switchReview",
         "key": "ctrl+shift+w",
         "mac": "cmd+shift+w"
+      },
+      {
+        "command": "agentReview.nextComment",
+        "key": "ctrl+shift+]",
+        "mac": "cmd+shift+]"
+      },
+      {
+        "command": "agentReview.previousComment",
+        "key": "ctrl+shift+[",
+        "mac": "cmd+shift+["
       }
     ],
     "menus": {
       "comments/comment/title": [
         {
           "command": "agentReview.editComment",
-          "when": "comment == agentReview && commentController == agent-review-comments",
+          "when": "comment == agentReview && commentController =~ /^agent-review-/",
           "group": "inline@1"
         },
         {
           "command": "agentReview.changeSeverity",
-          "when": "comment == agentReview && commentController == agent-review-comments",
+          "when": "comment == agentReview && commentController =~ /^agent-review-/",
           "group": "inline@2"
         },
         {
           "command": "agentReview.deleteComment",
-          "when": "comment == agentReview && commentController == agent-review-comments",
+          "when": "comment == agentReview && commentController =~ /^agent-review-/",
           "group": "inline@3"
         }
       ],
       "comments/comment/context": [
         {
           "command": "agentReview.saveComment",
-          "when": "comment == agentReviewEditing && commentController == agent-review-comments",
+          "when": "comment == agentReviewEditing && commentController =~ /^agent-review-/",
           "group": "inline@1"
         },
         {
           "command": "agentReview.cancelEdit",
-          "when": "comment == agentReviewEditing && commentController == agent-review-comments",
+          "when": "comment == agentReviewEditing && commentController =~ /^agent-review-/",
           "group": "inline@2"
         }
       ]

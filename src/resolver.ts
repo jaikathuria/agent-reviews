@@ -105,3 +105,19 @@ export function resolveCommentUri(
 
   return undefined;
 }
+
+/**
+ * Returns the filesystem path where `git show` should be executed.
+ * For submodule repos, this is the submodule directory; otherwise the workspace root.
+ */
+export function resolveGitRoot(
+  workspaceRoot: string,
+  submoduleMap: SubmoduleMap,
+  repoSlug: string
+): string {
+  const submodulePath = submoduleMap[repoSlug];
+  if (submodulePath) {
+    return path.join(workspaceRoot, submodulePath);
+  }
+  return workspaceRoot;
+}
