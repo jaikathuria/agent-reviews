@@ -2,7 +2,7 @@
   "name": "agent-review",
   "displayName": "Agent Review",
   "description": "Displays AI-generated code review comments inline using the VSCode Comments API",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "jaikathuria",
   "icon": "icon.png",
   "license": "MIT",
