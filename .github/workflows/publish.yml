@@ -17,6 +17,8 @@ jobs:
 
       - run: npm ci
 
+      - run: npm run compile
+
       - name: Publish to Marketplace
         run: npx @vscode/vsce publish --no-update-package-json
         env:
