@@ -69,6 +69,11 @@
         "icon": "$(github)"
       },
       {
+        "command": "agentReview.postCommentToGitHub",
+        "title": "Post Comment to GitHub",
+        "icon": "$(github)"
+      },
+      {
         "command": "agentReview.switchReview",
         "title": "Agent Review: Switch Review File"
       },
@@ -106,6 +111,12 @@
         "mac": "cmd+shift+w"
       },
       {
+        "command": "agentReview.postCommentToGitHub",
+        "key": "ctrl+shift+enter",
+        "mac": "cmd+shift+enter",
+        "when": "commentIsVisible"
+      },
+      {
         "command": "agentReview.nextComment",
         "key": "ctrl+shift+]",
         "mac": "cmd+shift+]"
@@ -132,6 +143,11 @@
           "command": "agentReview.deleteComment",
           "when": "comment == agentReview && commentController =~ /^agent-review-/",
           "group": "inline@3"
+        },
+        {
+          "command": "agentReview.postCommentToGitHub",
+          "when": "comment == agentReview && commentController =~ /^agent-review-/",
+          "group": "inline@4"
         }
       ],
       "comments/comment/context": [

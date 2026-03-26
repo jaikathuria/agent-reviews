@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as crypto from "crypto";
 
 export type Severity =
   | "blocking"
@@ -15,6 +16,8 @@ export interface ReviewAuthor {
 }
 
 export interface ReviewComment {
+  id?: string;       // Local UUID, assigned on first parse
+  githubId?: number; // GitHub comment database ID, set after posting
   path: string;
   line: number;
   side: "LEFT" | "RIGHT";
@@ -22,6 +25,7 @@ export interface ReviewComment {
   body: string;
   timestamp?: string; // ISO 8601, optional — when the review was generated
   author?: ReviewAuthor; // Per-comment author; falls back to pr.author if absent
+  status?: "posting" | "posted"; // undefined = local (not yet posted)
 }
 
 export interface ReviewFile {
@@ -39,6 +43,8 @@ export interface ReviewFile {
     strengths: string[];
   };
   comments: ReviewComment[];
+  pendingReviewId?: string;   // GraphQL node ID of the pending review on GitHub
+  prNodeId?: string;          // GraphQL node ID of the PR (cached after first lookup)
 }
 
 export async function parseReviewFile(filePath: string): Promise<ReviewFile> {
@@ -62,6 +68,18 @@ export async function parseReviewFile(filePath: string): Promise<ReviewFile> {
     }
     return true;
   });
+
+  // Assign stable UUIDs to comments that don't have one
+  let needsSave = false;
+  for (const comment of data.comments) {
+    if (!comment.id) {
+      comment.id = crypto.randomUUID();
+      needsSave = true;
+    }
+  }
+  if (needsSave) {
+    await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+  }
 
   return data as ReviewFile;
 }

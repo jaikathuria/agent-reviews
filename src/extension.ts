@@ -5,7 +5,16 @@ import * as path from "path";
 import { parseReviewFile, findReviewFiles, isReviewFilename, Severity } from "./parser";
 import { parseGitmodules, resolveGitRoot } from "./resolver";
 import { ReviewCommentController, AgentReviewComment, NavigationEntry } from "./comments";
-import { registerGitHubCommands } from "./github";
+import {
+  registerGitHubCommands,
+  getPRNodeId,
+  createPendingReview,
+  addCommentToPendingReview,
+  submitPendingReview,
+  submitVerdictOnly,
+  fetchPRReviewComments,
+  Verdict,
+} from "./github";
 import { registerGenerateInstructionsCommand } from "./generate-instructions";
 import { GitContentProvider, SCHEME, parseGitHubApiUri } from "./diffProvider";
 
@@ -108,8 +117,9 @@ async function loadAllReviews(extensionUri: vscode.Uri): Promise<void> {
   let totalLoaded = 0;
   let totalSkipped = 0;
 
+  const submoduleMap = parseGitmodules(workspaceRoot);
+
   for (const { filePath, review, stat } of parsed) {
-    const submoduleMap = parseGitmodules(workspaceRoot);
     const gitRoot = resolveGitRoot(workspaceRoot, submoduleMap, review.pr.repo);
     const basename = path.basename(filePath, ".json");
     const controllerId = `agent-review-${basename}`;
@@ -127,6 +137,14 @@ async function loadAllReviews(extensionUri: vscode.Uri): Promise<void> {
       filePath,
       gitRoot
     );
+
+    // Fetch and display existing GitHub PR comments
+    try {
+      const ghComments = await fetchPRReviewComments(review.pr.repo, review.pr.number);
+      ctrl.loadGitHubComments(ghComments);
+    } catch {
+      // Non-fatal — GitHub comments are best-effort
+    }
 
     totalLoaded += result.loaded;
     totalSkipped += result.skipped;
@@ -230,6 +248,81 @@ function watchReviewsDir(
     });
   } catch {
     // .reviews/ dir might not exist yet
+  }
+}
+
+const VERDICT_OPTIONS: { label: string; value: Verdict }[] = [
+  { label: "$(check) Approve", value: "APPROVE" },
+  { label: "$(request-changes) Request Changes", value: "REQUEST_CHANGES" },
+  { label: "$(comment) Comment", value: "COMMENT" },
+];
+
+async function deleteReviewFileAndCleanup(ctrl: ReviewCommentController): Promise<void> {
+  const filePath = ctrl.getReviewFilePath();
+  ctrl.dispose();
+  if (filePath) {
+    controllers.delete(filePath);
+    try {
+      await fs.promises.unlink(filePath);
+    } catch {
+      // File may already be gone
+    }
+  }
+  rebuildGlobalNavigation();
+  updateStatusBar(
+    Array.from(controllers.values()).reduce((sum, c) => sum + (c.getReview()?.comments.length || 0), 0),
+    0
+  );
+  if (controllers.size === 0) {
+    statusBarItem?.hide();
+  }
+}
+
+async function handleReviewCompletion(ctrl: ReviewCommentController): Promise<void> {
+  const reviewId = ctrl.getPendingReviewId();
+  const review = ctrl.getReview();
+  const hasPendingComments = !!reviewId;
+
+  const picked = await vscode.window.showQuickPick(
+    [
+      ...VERDICT_OPTIONS,
+      ...(!hasPendingComments ? [{ label: "$(close) Skip — just delete review file", value: "SKIP" as const }] : []),
+    ].map((v) => ({ label: v.label, value: v.value })),
+    { placeHolder: hasPendingComments ? "All comments posted. Submit review as:" : "All comments deleted. Submit a verdict to GitHub?" }
+  );
+  if (!picked) {
+    return;
+  }
+
+  if (picked.value === "SKIP") {
+    await deleteReviewFileAndCleanup(ctrl);
+    vscode.window.showInformationMessage("Agent Review: Review file removed.");
+    return;
+  }
+
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "Submitting review to GitHub...", cancellable: false },
+      async () => {
+        if (hasPendingComments) {
+          await submitPendingReview(reviewId, picked.value as Verdict);
+        } else if (review) {
+          let prNodeId = ctrl.getPrNodeId();
+          if (!prNodeId) {
+            prNodeId = await getPRNodeId(review.pr.repo, review.pr.number);
+          }
+          await submitVerdictOnly(prNodeId, picked.value as Verdict);
+        }
+      }
+    );
+    const prNumber = review?.pr.number;
+    await deleteReviewFileAndCleanup(ctrl);
+    vscode.window.showInformationMessage(
+      `Agent Review: Review submitted${prNumber ? ` to PR #${prNumber}` : ""}, review file removed.`
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    vscode.window.showErrorMessage(`Agent Review: Failed to submit review: ${msg}`);
   }
 }
 
@@ -404,6 +497,65 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         await ctrl.deleteComment(comment);
         rebuildGlobalNavigation();
+        if (ctrl.isReviewComplete()) {
+          await handleReviewCompletion(ctrl);
+        }
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "agentReview.postCommentToGitHub",
+      async (comment: AgentReviewComment) => {
+        const ctrl = findControllerForComment(comment);
+        if (!ctrl) {
+          return;
+        }
+        const review = ctrl.getReview();
+        if (!review) {
+          return;
+        }
+
+        const sourceComment = review.comments[comment.commentIndex];
+        if (!sourceComment || sourceComment.status) {
+          return; // Already posting/posted
+        }
+
+        // Set loading state immediately
+        await ctrl.markCommentPosting(comment);
+
+        try {
+          // Get/cache PR node ID
+          let prNodeId = ctrl.getPrNodeId();
+          if (!prNodeId) {
+            prNodeId = await getPRNodeId(review.pr.repo, review.pr.number);
+            await ctrl.setPrNodeId(prNodeId);
+          }
+
+          // Create pending review or add to existing one
+          let githubCommentId: number;
+          const pendingReviewId = ctrl.getPendingReviewId();
+          if (!pendingReviewId) {
+            const result = await createPendingReview(prNodeId, sourceComment);
+            await ctrl.setPendingReviewId(result.reviewId);
+            githubCommentId = result.githubCommentId;
+          } else {
+            githubCommentId = await addCommentToPendingReview(pendingReviewId, sourceComment);
+          }
+
+          // Mark as posted with GitHub comment ID (single in-place update, no rebuild)
+          await ctrl.markCommentPosted(comment, githubCommentId);
+
+          if (ctrl.isReviewComplete()) {
+            await handleReviewCompletion(ctrl);
+          }
+        } catch (err: unknown) {
+          // Revert to local state on failure
+          await ctrl.revertCommentStatus(comment);
+          const msg = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(`Agent Review: Failed to post comment: ${msg}`);
+        }
       }
     )
   );

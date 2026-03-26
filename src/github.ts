@@ -1,10 +1,36 @@
 import * as vscode from "vscode";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { promisify } from "util";
 
-import { ReviewFile } from "./parser";
+import { ReviewFile, ReviewComment } from "./parser";
 
 const execAsync = promisify(exec);
+
+/**
+ * Pipes JSON to `gh api` via stdin using spawn (no shell escaping needed).
+ * Returns parsed stdout.
+ */
+function ghApiStdin(args: string[], jsonPayload: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("gh", ["api", ...args, "--input", "-"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+    proc.on("close", (code: number | null) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `gh exited with code ${code}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+    proc.on("error", reject);
+    proc.stdin.write(jsonPayload);
+    proc.stdin.end();
+  });
+}
 
 interface GitHubReviewComment {
   path: string;
@@ -72,7 +98,6 @@ export async function postReviewToGitHub(
 
   const event = mapVerdict(review.summary.verdict);
 
-  // Build the payload
   const payload = JSON.stringify({
     commit_id: commitId,
     body,
@@ -80,11 +105,193 @@ export async function postReviewToGitHub(
     comments,
   });
 
-  // Write payload to a temp approach using echo pipe
-  const escapedPayload = payload.replace(/'/g, "'\\''");
-  await execAsync(
-    `echo '${escapedPayload}' | gh api repos/${repo}/pulls/${prNumber}/reviews --input -`
+  await ghApiStdin([`repos/${repo}/pulls/${prNumber}/reviews`], payload);
+}
+
+/**
+ * Gets the GraphQL node ID for a pull request.
+ */
+export async function getPRNodeId(
+  repo: string,
+  prNumber: number
+): Promise<string> {
+  const [owner, name] = repo.split("/");
+  const payload = JSON.stringify({
+    query: `query($owner: String!, $name: String!, $pr: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $pr) { id } }
+    }`,
+    variables: { owner, name, pr: prNumber },
+  });
+  const stdout = await ghApiStdin(["graphql"], payload);
+  const data = JSON.parse(stdout);
+  return data.data.repository.pullRequest.id;
+}
+
+/**
+ * Creates a pending review on GitHub with a single comment.
+ * Returns the review node ID and the created comment's database ID.
+ */
+function formatCommentBody(comment: ReviewComment): string {
+  return `**[${comment.severity.toUpperCase()}]** ${comment.body}`;
+}
+
+export async function createPendingReview(
+  prNodeId: string,
+  comment: ReviewComment
+): Promise<{ reviewId: string; githubCommentId: number }> {
+  const body = formatCommentBody(comment);
+  const thread = {
+    path: comment.path,
+    line: comment.line,
+    side: comment.side || "RIGHT",
+    body,
+  };
+  const payload = JSON.stringify({
+    query: `mutation($input: AddPullRequestReviewInput!) {
+      addPullRequestReview(input: $input) {
+        pullRequestReview {
+          id
+          comments(first: 1) {
+            nodes { databaseId }
+          }
+        }
+      }
+    }`,
+    variables: {
+      input: {
+        pullRequestId: prNodeId,
+        threads: [thread],
+      },
+    },
+  });
+  const stdout = await ghApiStdin(["graphql"], payload);
+  const data = JSON.parse(stdout);
+  const review = data.data.addPullRequestReview.pullRequestReview;
+  return {
+    reviewId: review.id,
+    githubCommentId: review.comments.nodes[0].databaseId,
+  };
+}
+
+/**
+ * Adds a comment to an existing pending review on GitHub.
+ * Returns the created comment's database ID.
+ */
+export async function addCommentToPendingReview(
+  reviewNodeId: string,
+  comment: ReviewComment
+): Promise<number> {
+  const body = formatCommentBody(comment);
+  const payload = JSON.stringify({
+    query: `mutation($input: AddPullRequestReviewThreadInput!) {
+      addPullRequestReviewThread(input: $input) {
+        thread {
+          comments(first: 1) {
+            nodes { databaseId }
+          }
+        }
+      }
+    }`,
+    variables: {
+      input: {
+        pullRequestReviewId: reviewNodeId,
+        path: comment.path,
+        line: comment.line,
+        side: comment.side || "RIGHT",
+        body,
+      },
+    },
+  });
+  const stdout = await ghApiStdin(["graphql"], payload);
+  const data = JSON.parse(stdout);
+  return data.data.addPullRequestReviewThread.thread.comments.nodes[0].databaseId;
+}
+
+export interface GitHubComment {
+  id: number;
+  path: string;
+  line: number;
+  side: string;
+  body: string;
+  author: string;
+  authorAvatarUrl: string;
+  createdAt: string;
+}
+
+/**
+ * Fetches all review comments on a PR from GitHub.
+ */
+export async function fetchPRReviewComments(
+  repo: string,
+  prNumber: number
+): Promise<GitHubComment[]> {
+  const { stdout } = await execAsync(
+    `gh api repos/${repo}/pulls/${prNumber}/comments --paginate`,
+    { maxBuffer: 10 * 1024 * 1024 }
   );
+  const raw = JSON.parse(stdout);
+  return (raw as any[]).map((c: any) => ({
+    id: c.id,
+    path: c.path,
+    line: c.line || c.original_line,
+    side: c.side || "RIGHT",
+    body: c.body,
+    author: c.user?.login || "unknown",
+    authorAvatarUrl: c.user?.avatar_url || "",
+    createdAt: c.created_at,
+  }));
+}
+
+export type Verdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+
+/**
+ * Creates and immediately submits a review with no inline comments (verdict + body only).
+ */
+export async function submitVerdictOnly(
+  prNodeId: string,
+  verdict: Verdict,
+  body?: string
+): Promise<void> {
+  const payload = JSON.stringify({
+    query: `mutation($input: AddPullRequestReviewInput!) {
+      addPullRequestReview(input: $input) {
+        pullRequestReview { id }
+      }
+    }`,
+    variables: {
+      input: {
+        pullRequestId: prNodeId,
+        event: verdict,
+        ...(body ? { body } : {}),
+      },
+    },
+  });
+  await ghApiStdin(["graphql"], payload);
+}
+
+/**
+ * Submits a pending review with a verdict.
+ */
+export async function submitPendingReview(
+  reviewNodeId: string,
+  verdict: Verdict,
+  body?: string
+): Promise<void> {
+  const payload = JSON.stringify({
+    query: `mutation($input: SubmitPullRequestReviewInput!) {
+      submitPullRequestReview(input: $input) {
+        pullRequestReview { state }
+      }
+    }`,
+    variables: {
+      input: {
+        pullRequestReviewId: reviewNodeId,
+        event: verdict,
+        ...(body ? { body } : {}),
+      },
+    },
+  });
+  await ghApiStdin(["graphql"], payload);
 }
 
 /**

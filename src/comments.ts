@@ -1,11 +1,13 @@
 import * as vscode from "vscode";
-
+import * as path from "path";
+import * as fs from "fs";
 import * as cp from "child_process";
 
 import { ReviewAuthor, ReviewComment, ReviewFile, Severity, saveReviewFile } from "./parser";
 import { resolveCommentUri } from "./resolver";
 import { getIconUri } from "./icons";
 import { buildGitHubApiUri } from "./diffProvider";
+import { GitHubComment } from "./github";
 
 interface SubmoduleMap {
   [repoSlug: string]: string;
@@ -36,6 +38,7 @@ export interface NavigationEntry {
 export class ReviewCommentController {
   private controller: vscode.CommentController;
   private threads: vscode.CommentThread[] = [];
+  private githubThreads: vscode.CommentThread[] = [];
 
   // In-memory state for persistence
   private review: ReviewFile | undefined;
@@ -170,6 +173,104 @@ export class ReviewCommentController {
     t.comments = [...t.comments];
   }
 
+  async markCommentPosting(comment: AgentReviewComment): Promise<void> {
+    if (!this.review || !this.reviewFilePath) {
+      return;
+    }
+    const source = this.review.comments[comment.commentIndex];
+    if (source) {
+      source.status = "posting";
+    }
+    // Update VSCode comment in-place (no thread rebuild)
+    comment.label = `${(source?.severity || "").toUpperCase()} · Syncing...`;
+    comment.contextValue = "agentReviewPosting";
+    const t = comment.threadRef;
+    if (t) { t.comments = [...t.comments]; }
+    await this.persistOnly();
+  }
+
+  async markCommentPosted(comment: AgentReviewComment, githubId?: number): Promise<void> {
+    if (!this.review || !this.reviewFilePath) {
+      return;
+    }
+    const source = this.review.comments[comment.commentIndex];
+    if (source) {
+      source.status = "posted";
+      if (githubId !== undefined) {
+        source.githubId = githubId;
+      }
+    }
+    // Update VSCode comment in-place (no thread rebuild)
+    comment.label = `${(source?.severity || "").toUpperCase()} · Synced`;
+    comment.contextValue = "agentReviewPosted";
+    const t = comment.threadRef;
+    if (t) { t.comments = [...t.comments]; }
+    await this.persistOnly();
+  }
+
+  isReviewComplete(): boolean {
+    if (!this.review) {
+      return true;
+    }
+    return this.review.comments.every((c) => c.status === "posted");
+  }
+
+  async revertCommentStatus(comment: AgentReviewComment): Promise<void> {
+    if (!this.review || !this.reviewFilePath) {
+      return;
+    }
+    const source = this.review.comments[comment.commentIndex];
+    if (source) {
+      delete source.status;
+      delete source.githubId;
+    }
+    // Revert VSCode comment in-place
+    comment.label = (source?.severity || "").toUpperCase();
+    comment.contextValue = "agentReview";
+    const t = comment.threadRef;
+    if (t) { t.comments = [...t.comments]; }
+    await this.persistOnly();
+  }
+
+  hasUnpostedComments(): boolean {
+    if (!this.review) {
+      return false;
+    }
+    return this.review.comments.some((c) => !c.status);
+  }
+
+  getPendingReviewId(): string | undefined {
+    return this.review?.pendingReviewId;
+  }
+
+  async setPendingReviewId(id: string): Promise<void> {
+    if (!this.review || !this.reviewFilePath) {
+      return;
+    }
+    this.review.pendingReviewId = id;
+    await this.persistOnly();
+  }
+
+  getPrNodeId(): string | undefined {
+    return this.review?.prNodeId;
+  }
+
+  async setPrNodeId(id: string): Promise<void> {
+    if (!this.review || !this.reviewFilePath) {
+      return;
+    }
+    this.review.prNodeId = id;
+    await this.persistOnly();
+  }
+
+  async clearPendingReviewId(): Promise<void> {
+    if (!this.review || !this.reviewFilePath) {
+      return;
+    }
+    delete this.review.pendingReviewId;
+    await this.persistOnly();
+  }
+
   getReview(): ReviewFile | undefined {
     return this.review;
   }
@@ -179,9 +280,83 @@ export class ReviewCommentController {
       thread.dispose();
     }
     this.threads = [];
+    for (const thread of this.githubThreads) {
+      thread.dispose();
+    }
+    this.githubThreads = [];
     this.commentsByPath.clear();
     this.attachedUris.clear();
     this.commentedFiles = [];
+  }
+
+  loadGitHubComments(ghComments: GitHubComment[]): void {
+    for (const thread of this.githubThreads) {
+      thread.dispose();
+    }
+    this.githubThreads = [];
+
+    if (!this.prCommits || !this.review || !this.workspaceRoot) {
+      return;
+    }
+
+    // Filter out GitHub comments that match locally posted comments
+    const postedGithubIds = new Set<number>();
+    for (const c of this.review.comments) {
+      if (c.githubId) {
+        postedGithubIds.add(c.githubId);
+      }
+    }
+    const filtered = ghComments.filter((c) => !postedGithubIds.has(c.id));
+
+    // Group by path + line
+    const byKey = new Map<string, GitHubComment[]>();
+    for (const c of filtered) {
+      const key = `${c.path}:${c.line}:${c.side}`;
+      const arr = byKey.get(key);
+      if (arr) {
+        arr.push(c);
+      } else {
+        byKey.set(key, [c]);
+      }
+    }
+
+    for (const [, comments] of byKey) {
+      const first = comments[0];
+      const side = (first.side || "RIGHT").toUpperCase();
+
+      const fileUri = resolveCommentUri(
+        this.workspaceRoot,
+        this.submoduleMap,
+        this.review.pr.repo,
+        first.path
+      );
+      if (!fileUri) {
+        continue;
+      }
+
+      const commitSha = side === "LEFT" ? this.prCommits.baseCommit : this.prCommits.headCommit;
+      const uri = buildGitHubApiUri(first.path, commitSha, this.review.pr.repo, fileUri.fsPath);
+
+      const range = new vscode.Range(Math.max(0, first.line - 1), 0, Math.max(0, first.line - 1), 0);
+
+      const vsComments: vscode.Comment[] = comments.map((c) => ({
+        author: {
+          name: c.author,
+          iconPath: c.authorAvatarUrl ? vscode.Uri.parse(c.authorAvatarUrl) : undefined,
+        },
+        body: new vscode.MarkdownString(c.body),
+        mode: vscode.CommentMode.Preview,
+        contextValue: "githubComment",
+        timestamp: new Date(c.createdAt),
+      }));
+
+      const thread = this.controller.createCommentThread(uri, range, vsComments);
+      thread.canReply = false;
+      thread.contextValue = "githubCommentThread";
+      thread.label = comments[0].author;
+      thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+      this.githubThreads.push(thread);
+    }
   }
 
   dispose(): void {
@@ -257,7 +432,10 @@ export class ReviewCommentController {
       this.review.pr.repo,
       relativePath
     );
-    if (!fileUri) {
+
+    // For new files in the PR, construct the path from the submodule map
+    const absolutePath = fileUri?.fsPath || this.resolveAbsolutePath(relativePath);
+    if (!absolutePath) {
       return;
     }
 
@@ -272,7 +450,6 @@ export class ReviewCommentController {
     const title = `${relativePath} (PR #${this.review.pr.number})`;
 
     try {
-      const absolutePath = fileUri.fsPath;
       const repo = this.review.pr.repo;
       const baseUri = buildGitHubApiUri(relativePath, this.prCommits.baseCommit, repo, absolutePath);
       const headUri = buildGitHubApiUri(relativePath, this.prCommits.headCommit, repo, absolutePath);
@@ -321,6 +498,27 @@ export class ReviewCommentController {
   }
 
   // --- Private helpers ---
+
+  /**
+   * Constructs an absolute path for a file using the submodule map,
+   * but only if the submodule directory actually exists in the workspace.
+   * Used for new files in the PR that don't exist locally yet.
+   */
+  private resolveAbsolutePath(relativePath: string): string | undefined {
+    if (!this.workspaceRoot || !this.review) {
+      return undefined;
+    }
+    const submodulePath = this.submoduleMap[this.review.pr.repo];
+    if (!submodulePath) {
+      return undefined;
+    }
+    const basePath = path.join(this.workspaceRoot, submodulePath);
+    // Only allow if the base directory (submodule root) exists
+    if (!fs.existsSync(basePath)) {
+      return undefined;
+    }
+    return path.join(basePath, relativePath);
+  }
 
   /**
    * Pre-fetch content for all commented files from GitHub API in background.
@@ -381,7 +579,7 @@ export class ReviewCommentController {
     });
   }
 
-  private async persistAndRebuild(): Promise<void> {
+  private async persistOnly(): Promise<void> {
     if (this.review && this.reviewFilePath) {
       this.isSaving = true;
       await saveReviewFile(this.reviewFilePath, this.review);
@@ -389,6 +587,10 @@ export class ReviewCommentController {
         this.isSaving = false;
       }, 1000);
     }
+  }
+
+  private async persistAndRebuild(): Promise<void> {
+    await this.persistOnly();
     this.rebuildThreads();
   }
 
@@ -433,7 +635,22 @@ export class ReviewCommentController {
         relativePath
       );
 
-      if (!fileUri) {
+      // Construct the expected absolute path even if the file doesn't exist locally
+      // (new files in the PR branch are fetched via GitHub API)
+      let absolutePath: string | undefined;
+      if (fileUri) {
+        absolutePath = fileUri.fsPath;
+        this.commentedFiles.push({ relativePath, fileUri });
+      } else if (this.prCommits) {
+        // File doesn't exist locally — only allow if the submodule dir exists
+        // (the repo is checked out, just this specific file is new in the PR)
+        const syntheticPath = this.resolveAbsolutePath(relativePath);
+        if (syntheticPath) {
+          absolutePath = syntheticPath;
+        }
+      }
+
+      if (!absolutePath) {
         console.warn(
           `[agent-review] Could not resolve path: ${relativePath} (repo: ${this.review.pr.repo})`
         );
@@ -441,11 +658,8 @@ export class ReviewCommentController {
         continue;
       }
 
-      this.commentedFiles.push({ relativePath, fileUri });
-
       // Attach threads to GitHub API URIs (matching what openDiffForFile uses)
       if (this.prCommits) {
-        const absolutePath = fileUri.fsPath;
         const repo = this.review.pr.repo;
 
         if (sides.right.length > 0) {
@@ -459,13 +673,15 @@ export class ReviewCommentController {
           this.createThreadsForEntries(sides.left, baseUri);
           loaded += sides.left.length;
         }
-      } else {
+      } else if (fileUri) {
         // No PR commits available — attach to file: URIs as fallback
         if (sides.right.length > 0) {
           this.createThreadsForEntries(sides.right, fileUri);
           loaded += sides.right.length;
         }
         skipped += sides.left.length;
+      } else {
+        skipped += sides.left.length + sides.right.length;
       }
     }
 
@@ -522,12 +738,23 @@ export class ReviewCommentController {
     return entries.map((entry) => {
       const c = entry.comment;
       const authorInfo = this.resolveAuthor(c, this.extensionUri!);
+
+      let label = c.severity.toUpperCase();
+      let contextValue = "agentReview";
+      if (c.status === "posting") {
+        label = `${label} · Syncing...`;
+        contextValue = "agentReviewPosting";
+      } else if (c.status === "posted") {
+        label = `${label} · Synced`;
+        contextValue = "agentReviewPosted";
+      }
+
       const agentComment: AgentReviewComment = {
         author: authorInfo,
         body: new vscode.MarkdownString(c.body),
         mode: vscode.CommentMode.Preview,
-        label: c.severity.toUpperCase(),
-        contextValue: "agentReview",
+        label,
+        contextValue,
         commentIndex: entry.index,
         reviewFilePath: this.reviewFilePath,
       };
