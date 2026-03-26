@@ -23,10 +23,14 @@ npm run compile
 ```bash
 # From the extension directory
 npx @vscode/vsce package
-code --install-extension agent-review-0.1.0.vsix
+code --install-extension agent-review-0.3.0.vsix
 ```
 
 Or for development: open this folder in VSCode and press F5 to launch the Extension Development Host.
+
+### Prerequisites
+
+- **GitHub CLI (`gh`)** — required for GitHub features (posting comments, fetching PR diffs, loading existing comments). Install from [cli.github.com](https://cli.github.com) and authenticate with `gh auth login`.
 
 ### Prepare your project
 
@@ -48,6 +52,7 @@ Place a review file matching `<repo-slug>-pr-<number>-review-comments.json` in y
 - **Agent Review: Load Review File...** — open a file picker to load any review JSON
 - **Agent Review: Reload Comments** — refresh from the current review file
 - **Agent Review: Clear All Comments** — remove all inline comments
+- **Agent Review: Post Review to GitHub** — post all comments as a batch review (`Cmd+Shift+G`)
 - **Agent Review: Generate Agent Instructions** — create an instructions file for AI agents in your project (supports CLAUDE.md, Cursor rules, Copilot instructions, or custom path)
 
 ### Inline comment actions
@@ -57,8 +62,40 @@ Each comment has action icons in its title bar:
 - **Edit** (pencil) — switch to editing mode, then Save/Cancel
 - **Change Severity** (tag) — pick a new severity from a dropdown
 - **Delete** (trash) — remove the comment
+- **Post to GitHub** (GitHub icon) — sync this comment to the PR as a pending review comment
 
 All changes persist back to the JSON file automatically.
+
+### Syncing individual comments to GitHub
+
+Instead of posting all comments at once, you can sync them one at a time:
+
+1. Click the GitHub icon on a comment (or press `Cmd+Shift+Enter`)
+2. The comment label changes to `SEVERITY · Syncing...` while posting
+3. On success it shows `SEVERITY · Synced` — the comment is now a pending review comment on GitHub
+4. When all comments are synced or deleted, you're prompted to submit the review with a verdict (Approve / Request Changes / Comment)
+5. The review file is automatically deleted after submission
+
+Comments are posted via the GitHub GraphQL API as pending review comments. They become visible on the PR only after you submit the review with a verdict.
+
+If a post fails, the comment reverts to its local state so you can retry.
+
+### GitHub PR comments in diff view
+
+When a review is loaded, existing review comments from the GitHub PR are fetched and displayed as read-only threads in the diff view. These appear alongside your local review comments, giving you full context of the ongoing discussion.
+
+Comments you've already synced are deduplicated — they won't appear twice.
+
+### Keyboard shortcuts
+
+| Shortcut | Command |
+|----------|---------|
+| `Cmd+Shift+R` | Reload comments |
+| `Cmd+Shift+G` | Post entire review to GitHub |
+| `Cmd+Shift+Enter` | Post focused comment to GitHub |
+| `Cmd+Shift+W` | Switch between review files |
+| `Cmd+Shift+]` | Next comment |
+| `Cmd+Shift+[` | Previous comment |
 
 ### File watching
 
@@ -208,7 +245,8 @@ The extension applies these rules when loading a review file:
 
 - `pr` and `comments` array must be present — file is rejected otherwise
 - Comments missing `path`, `line`, or `body` are silently skipped (other comments still load)
-- Comments referencing files that don't exist locally are skipped with a count shown in the info message
+- Comments on files that don't exist locally but belong to a checked-out submodule are still shown (content is fetched from GitHub API for the diff view)
+- Comments referencing files in repos not present in the workspace are skipped
 - `severity` defaults to `nit` styling if an unrecognized value is used
 
 ## For AI Agents
