@@ -1,6 +1,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 interface SubmoduleMap {
   [repoSlug: string]: string; // e.g. "acme/backend-api" -> "services/backend"
@@ -22,6 +26,19 @@ function normalizeGitUrl(url: string): string | undefined {
     return httpsMatch[1];
   }
   return undefined;
+}
+
+/**
+ * Returns the owner/repo slug for the workspace's own git remote origin.
+ * Returns undefined if git is not available or the remote is not set.
+ */
+export async function getMainRepoSlug(workspaceRoot: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execAsync("git remote get-url origin", { cwd: workspaceRoot });
+    return normalizeGitUrl(stdout.trim());
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { parseReviewFile, findReviewFiles, isReviewFilename, Severity } from "./parser";
-import { parseGitmodules, resolveGitRoot } from "./resolver";
+import { parseGitmodules, resolveGitRoot, getMainRepoSlug } from "./resolver";
 import { ReviewCommentController, AgentReviewComment, NavigationEntry } from "./comments";
 import {
   registerGitHubCommands,
@@ -17,6 +17,7 @@ import {
 } from "./github";
 import { registerGenerateInstructionsCommand } from "./generate-instructions";
 import { GitContentProvider, SCHEME, parseGitHubApiUri } from "./diffProvider";
+import { PROverviewProvider } from "./prOverviewProvider";
 
 const ALL_SEVERITIES: { label: string; value: Severity }[] = [
   { label: "$(error) Blocking", value: "blocking" },
@@ -33,6 +34,7 @@ let fileWatcher: fs.FSWatcher | undefined;
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 let gitContentProvider: GitContentProvider | undefined;
+let prOverviewProvider: PROverviewProvider | undefined;
 
 // Navigation state (merged across all controllers)
 let navigationList: NavigationEntry[] = [];
@@ -119,6 +121,14 @@ async function loadAllReviews(extensionUri: vscode.Uri): Promise<void> {
 
   const submoduleMap = parseGitmodules(workspaceRoot);
 
+  // Collect workspace repo slugs for filtering pending PRs
+  const workspaceRepos = new Set(Object.keys(submoduleMap));
+  const mainRepoSlug = await getMainRepoSlug(workspaceRoot);
+  if (mainRepoSlug) {
+    workspaceRepos.add(mainRepoSlug);
+  }
+  prOverviewProvider?.setWorkspaceRepos(workspaceRepos);
+
   for (const { filePath, review, stat } of parsed) {
     const gitRoot = resolveGitRoot(workspaceRoot, submoduleMap, review.pr.repo);
     const basename = path.basename(filePath, ".json");
@@ -159,6 +169,9 @@ async function loadAllReviews(extensionUri: vscode.Uri): Promise<void> {
   if (files.length === 0) {
     statusBarItem?.hide();
   }
+
+  // Update the PR overview sidebar
+  prOverviewProvider?.updateReviews(controllers);
 }
 
 /**
@@ -340,6 +353,45 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   statusBarItem.command = "agentReview.reload";
   context.subscriptions.push(statusBarItem);
+
+  // --- PR Overview sidebar ---
+  prOverviewProvider = new PROverviewProvider();
+  const prOverviewTreeView = vscode.window.createTreeView("agentReview.prOverview", {
+    treeDataProvider: prOverviewProvider,
+    showCollapseAll: false,
+  });
+  context.subscriptions.push(prOverviewTreeView);
+
+  // Fetch pending PRs on first panel open
+  context.subscriptions.push(
+    prOverviewTreeView.onDidChangeVisibility((e) => {
+      if (e.visible) {
+        prOverviewProvider?.fetchPendingPRsIfNeeded();
+      }
+    })
+  );
+
+  // Auto-refresh every 15 minutes while panel is visible
+  const refreshIntervalId = setInterval(() => {
+    if (prOverviewTreeView.visible) {
+      prOverviewProvider?.refresh();
+    }
+  }, 15 * 60 * 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(refreshIntervalId) });
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("agentReview.refreshPROverview", () => {
+      prOverviewProvider?.refresh();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("agentReview.openPROnGitHub", (item: import("./prOverviewProvider").PROverviewItem) => {
+      if (item?.prUrl) {
+        vscode.env.openExternal(vscode.Uri.parse(item.prUrl));
+      }
+    })
+  );
 
   // --- Diff-on-click: when clicking a comment opens a file, redirect to diff view ---
   context.subscriptions.push(

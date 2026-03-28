@@ -1,0 +1,8 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Magnifying glass circle -->
+  <circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.8" fill="none"/>
+  <!-- Handle -->
+  <line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  <!-- Sparkle star inside the glass -->
+  <path d="M10.5 6.5 L10.5 8.5 M10.5 12.5 L10.5 14.5 M6.5 10.5 L8.5 10.5 M12.5 10.5 L14.5 10.5 M8 8 L9 9 M12 8 L11 9 M8 13 L9 12 M12 13 L11 12" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+</svg>

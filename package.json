@@ -92,6 +92,16 @@
       {
         "command": "agentReview.previousComment",
         "title": "Agent Review: Previous Comment"
+      },
+      {
+        "command": "agentReview.refreshPROverview",
+        "title": "Agent Review: Refresh PR Overview",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agentReview.openPROnGitHub",
+        "title": "Open on GitHub",
+        "icon": "$(link-external)"
       }
     ],
     "keybindings": [
@@ -127,7 +137,44 @@
         "mac": "cmd+shift+["
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agent-reviews",
+          "title": "Agent Reviews",
+          "icon": "icons/sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "agent-reviews": [
+        {
+          "id": "agentReview.prOverview",
+          "name": "PR Reviews"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "agentReview.prOverview",
+        "contents": "No review files loaded.\n[Load Review File](command:agentReview.loadFile)"
+      }
+    ],
     "menus": {
+      "view/title": [
+        {
+          "command": "agentReview.refreshPROverview",
+          "when": "view == agentReview.prOverview",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentReview.openPROnGitHub",
+          "when": "view == agentReview.prOverview && viewItem =~ /^(reviewedPR|pendingPR)$/",
+          "group": "inline"
+        }
+      ],
       "comments/comment/title": [
         {
           "command": "agentReview.editComment",
