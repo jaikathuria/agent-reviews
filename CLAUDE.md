@@ -36,6 +36,10 @@ github.ts    → Posts reviews to GitHub PRs via `gh` CLI. Builds review payload
                inline comments and maps verdict → GitHub review event.
 
 icons.ts     → Maps Severity → SVG icon filename → extension URI for comment badges.
+
+prOverviewProvider.ts → TreeDataProvider for the Activity Bar sidebar panel. Shows two
+               sections: "Reviewed" (PRs from .reviews/ grouped by repo) and "Pending
+               Review" (PRs where user is requested reviewer, fetched via gh CLI).
 ```
 
 **Data flow:** JSON file → `parseReviewFile()` → `ReviewCommentController.loadReview()` → groups comments by path:line into `CommentThread[]` → VSCode renders inline. Mutations flow back: edit/delete → `updateCommentBody()`/`deleteComment()` → `persistAndRebuild()` → `saveReviewFile()` → JSON file. A file watcher reloads on external changes (with `isSaving` flag to prevent loops).
@@ -63,19 +67,21 @@ High-severity comments (blocking, important) auto-expand; others collapse.
 
 This project uses [Taskmaster](https://github.com/task-master-ai/task-master) for task-driven development. Tasks live in `.taskmaster/tasks/tasks.json`.
 
+**Important:** Always use `npx task-master` to run commands (the CLI is not globally installed).
+
 **Basic workflow:**
 ```bash
-task-master list                        # See all tasks with status
-task-master next                        # Get the next task to work on
-task-master show <id>                   # View task details
-task-master expand --id=<id> --research # Break complex task into subtasks
-task-master set-status --id=<id> --status=done  # Mark task complete
+npx task-master list                        # See all tasks with status
+npx task-master next                        # Get the next task to work on
+npx task-master show <id>                   # View task details
+npx task-master expand --id=<id> --research # Break complex task into subtasks
+npx task-master set-status --id=<id> --status=done  # Mark task complete
 ```
 
 **When implementation diverges from the plan:**
 ```bash
-task-master update --from=<id> --prompt="describe what changed"  # Update future tasks
-task-master update-task --id=<id> --prompt="new details"         # Update a specific task
+npx task-master update --from=<id> --prompt="describe what changed"  # Update future tasks
+npx task-master update-task --id=<id> --prompt="new details"         # Update a specific task
 ```
 
 **Configuration:** `.taskmaster/config.json` controls AI model settings (provider, model, temperature). The project is configured to use `claude-code` as the provider with `opus` for main tasks and research.
