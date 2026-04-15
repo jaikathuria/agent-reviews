@@ -63,31 +63,6 @@ High-severity comments (blocking, important) auto-expand; others collapse.
 - `Cmd+Shift+G` — Post review to GitHub PR (requires `gh` CLI authenticated)
 - `Cmd+Shift+W` — Switch between review files
 
-## Task Management (Taskmaster)
-
-This project uses [Taskmaster](https://github.com/task-master-ai/task-master) for task-driven development. Tasks live in `.taskmaster/tasks/tasks.json`.
-
-**Important:** Always use `npx task-master` to run commands (the CLI is not globally installed).
-
-**Basic workflow:**
-```bash
-npx task-master list                        # See all tasks with status
-npx task-master next                        # Get the next task to work on
-npx task-master show <id>                   # View task details
-npx task-master expand --id=<id> --research # Break complex task into subtasks
-npx task-master set-status --id=<id> --status=done  # Mark task complete
-```
-
-**When implementation diverges from the plan:**
-```bash
-npx task-master update --from=<id> --prompt="describe what changed"  # Update future tasks
-npx task-master update-task --id=<id> --prompt="new details"         # Update a specific task
-```
-
-**Configuration:** `.taskmaster/config.json` controls AI model settings (provider, model, temperature). The project is configured to use `claude-code` as the provider with `opus` for main tasks and research.
-
-**PRD:** The product requirements document is at `.taskmaster/docs/prd.txt`. To regenerate tasks from it: `task-master parse-prd .taskmaster/docs/prd.txt`.
-
 ## Monorepo/Submodule Support
 
 `resolver.ts` parses `.gitmodules` to map repo URLs → local submodule paths. Comment `path` fields (relative to the reviewed repo) get prefixed with the submodule directory to resolve to workspace-absolute paths.
