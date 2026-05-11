@@ -232,6 +232,10 @@ export class ReviewCommentController {
     await this.persistOnly();
   }
 
+  getCommentStatus(index: number): string | undefined {
+    return this.review?.comments[index]?.status;
+  }
+
   hasUnpostedComments(): boolean {
     if (!this.review) {
       return false;

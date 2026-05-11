@@ -2,7 +2,7 @@
   "name": "agent-review",
   "displayName": "Agent Review",
   "description": "Displays AI-generated code review comments inline using the VSCode Comments API",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "jaikathuria",
   "icon": "icon.png",
   "license": "MIT",
@@ -102,6 +102,11 @@
         "command": "agentReview.openPROnGitHub",
         "title": "Open on GitHub",
         "icon": "$(link-external)"
+      },
+      {
+        "command": "agentReview.triggerAgentReview",
+        "title": "Trigger Agent Review",
+        "icon": "$(sparkle)"
       }
     ],
     "keybindings": [
@@ -170,9 +175,14 @@
       ],
       "view/item/context": [
         {
+          "command": "agentReview.triggerAgentReview",
+          "when": "view == agentReview.prOverview && viewItem == pendingPR",
+          "group": "inline@1"
+        },
+        {
           "command": "agentReview.openPROnGitHub",
           "when": "view == agentReview.prOverview && viewItem =~ /^(reviewedPR|pendingPR)$/",
-          "group": "inline"
+          "group": "inline@2"
         }
       ],
       "comments/comment/title": [
@@ -209,6 +219,42 @@
           "group": "inline@2"
         }
       ]
+    },
+    "configuration": {
+      "title": "Agent Review",
+      "properties": {
+        "agentReview.agent": {
+          "type": "string",
+          "default": "claude",
+          "enum": ["claude", "codex", "custom"],
+          "enumDescriptions": [
+            "Claude Code (claude CLI)",
+            "OpenAI Codex CLI",
+            "Custom command template (set agentReview.agentCommand)"
+          ],
+          "description": "Which AI agent to use for PR reviews."
+        },
+        "agentReview.agentCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Custom command template. Available variables: ${repo}, ${number}, ${title}, ${base}, ${head}, ${reviewsDir}, ${outputFilename}"
+        },
+        "agentReview.agentRunIn": {
+          "type": "string",
+          "default": "terminal",
+          "enum": ["terminal", "background"],
+          "enumDescriptions": [
+            "Run in a visible VS Code terminal (recommended — see agent progress)",
+            "Run as a background process with progress notification"
+          ],
+          "description": "Where the agent process runs."
+        },
+        "agentReview.agentTimeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "description": "Timeout in seconds for background agent execution. 0 = no timeout. Only applies when agentRunIn is 'background'."
+        }
+      }
     }
   },
   "scripts": {
