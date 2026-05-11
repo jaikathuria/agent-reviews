@@ -18,6 +18,7 @@ import {
 import { registerGenerateInstructionsCommand } from "./generate-instructions";
 import { GitContentProvider, SCHEME, parseGitHubApiUri } from "./diffProvider";
 import { PROverviewProvider } from "./prOverviewProvider";
+import { registerAgentRunnerCommand } from "./agentRunner";
 
 const ALL_SEVERITIES: { label: string; value: Severity }[] = [
   { label: "$(error) Blocking", value: "blocking" },
@@ -42,6 +43,47 @@ let commentNavIndex = -1;
 
 // Flag to prevent diff-on-click loop when we programmatically open a diff
 let isOpeningDiff = false;
+
+/**
+ * Find the index in navigationList matching a given comment's path, line, and reviewFilePath.
+ */
+function findNavIndex(navPath: string, navLine: number, reviewFilePath?: string): number {
+  return navigationList.findIndex(
+    (e) => e.path === navPath && e.line === navLine && e.reviewFilePath === reviewFilePath
+  );
+}
+
+/**
+ * Navigate to the next unposted comment in the navigation list (starting from commentNavIndex).
+ * Used after syncing a comment so the user lands on the next actionable one.
+ */
+async function navigateToNextUnpostedComment(): Promise<void> {
+  if (navigationList.length === 0) {
+    return;
+  }
+  const start = commentNavIndex >= 0 ? commentNavIndex : 0;
+  for (let offset = 1; offset <= navigationList.length; offset++) {
+    const idx = (start + offset) % navigationList.length;
+    const entry = navigationList[idx];
+    const ctrl = entry.reviewFilePath ? controllers.get(entry.reviewFilePath) : undefined;
+    if (!ctrl) {
+      continue;
+    }
+    // Find the comment index in the review that matches this nav entry
+    const review = ctrl.getReview();
+    if (!review) {
+      continue;
+    }
+    const commentIdx = review.comments.findIndex(
+      (c) => c.path === entry.path && c.line === entry.line
+    );
+    if (commentIdx >= 0 && !ctrl.getCommentStatus(commentIdx)) {
+      commentNavIndex = idx;
+      await navigateToComment(entry);
+      return;
+    }
+  }
+}
 
 function getWorkspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -460,6 +502,31 @@ export function activate(context: vscode.ExtensionContext): void {
   // --- Agent instructions ---
   registerGenerateInstructionsCommand(context);
 
+  // --- Agent runner (trigger AI review from sidebar) ---
+  registerAgentRunnerCommand(context, prOverviewProvider);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "agentReview.openReviewComment",
+      async (reviewFilePath: string, commentIndex: number) => {
+        const ctrl = controllers.get(reviewFilePath);
+        const review = ctrl?.getReview();
+        const comment = review?.comments[commentIndex];
+        if (!ctrl || !comment) {
+          return;
+        }
+        isOpeningDiff = true;
+        try {
+          await ctrl.openDiffForFile(comment.path, comment.line);
+        } finally {
+          setTimeout(() => {
+            isOpeningDiff = false;
+          }, 1000);
+        }
+      }
+    )
+  );
+
   // --- Commands ---
 
   context.subscriptions.push(
@@ -547,10 +614,24 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!ctrl) {
           return;
         }
+
+        // Capture position before delete so we can navigate to the "next" comment
+        const review = ctrl.getReview();
+        const sourceComment = review?.comments[comment.commentIndex];
+        let savedNavIdx = -1;
+        if (sourceComment) {
+          savedNavIdx = findNavIndex(sourceComment.path, sourceComment.line, ctrl.getReviewFilePath());
+        }
+
         await ctrl.deleteComment(comment);
         rebuildGlobalNavigation();
+
         if (ctrl.isReviewComplete()) {
           await handleReviewCompletion(ctrl);
+        } else if (navigationList.length > 0 && savedNavIdx >= 0) {
+          // After rebuild the deleted entry is gone; the same index now points to the next comment
+          commentNavIndex = Math.min(savedNavIdx, navigationList.length - 1);
+          await navigateToComment(navigationList[commentNavIndex]);
         }
       }
     )
@@ -601,6 +682,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
           if (ctrl.isReviewComplete()) {
             await handleReviewCompletion(ctrl);
+          } else {
+            // Update nav index to current comment, then jump to next unposted
+            const srcComment = review.comments[comment.commentIndex];
+            if (srcComment) {
+              const idx = findNavIndex(srcComment.path, srcComment.line, ctrl.getReviewFilePath());
+              if (idx >= 0) {
+                commentNavIndex = idx;
+              }
+            }
+            await navigateToNextUnpostedComment();
           }
         } catch (err: unknown) {
           // Revert to local state on failure

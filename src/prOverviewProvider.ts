@@ -6,7 +6,7 @@ import { Severity, ReviewComment } from "./parser";
 
 const execAsync = promisify(exec);
 
-type OverviewNodeType = "section" | "separator" | "repo-reviewed" | "repo-pending" | "pr-reviewed" | "pr-pending" | "error";
+type OverviewNodeType = "section" | "separator" | "repo-reviewed" | "repo-pending" | "pr-reviewed" | "pr-pending" | "pr-comment" | "error";
 
 interface PendingPR {
   number: number;
@@ -26,10 +26,20 @@ export class PROverviewItem extends vscode.TreeItem {
     public readonly repoName?: string,
     public readonly reviewFilePath?: string,
     public readonly prNumber?: number,
+    public readonly commentIndex?: number,
   ) {
     super(label, collapsibleState);
   }
 }
+
+const SEVERITY_ICON: Record<Severity, { icon: string; color?: string }> = {
+  blocking: { icon: "error", color: "charts.red" },
+  important: { icon: "warning", color: "charts.orange" },
+  suggestion: { icon: "lightbulb", color: "charts.yellow" },
+  nit: { icon: "info", color: "charts.blue" },
+  praise: { icon: "thumbsup", color: "charts.green" },
+  learning: { icon: "book", color: "charts.purple" },
+};
 
 const SEVERITY_ORDER: Severity[] = [
   "blocking", "important", "suggestion", "nit", "praise", "learning",
@@ -69,9 +79,28 @@ export class PROverviewProvider implements vscode.TreeDataProvider<PROverviewIte
   private pendingError: string | undefined;
   private pendingFetched = false;
   private workspaceRepos: Set<string> = new Set();
+  private runningPRs: Set<string> = new Set();
 
   setWorkspaceRepos(repos: Set<string>): void {
     this.workspaceRepos = repos;
+  }
+
+  setAgentRunning(repo: string, prNumber: number, running: boolean): void {
+    const key = `${repo}#${prNumber}`;
+    if (running) {
+      this.runningPRs.add(key);
+    } else {
+      this.runningPRs.delete(key);
+    }
+    this._onDidChangeTreeData.fire();
+  }
+
+  isAgentRunning(repo: string, prNumber: number): boolean {
+    return this.runningPRs.has(`${repo}#${prNumber}`);
+  }
+
+  getPendingPR(repo: string, prNumber: number): PendingPR | undefined {
+    return this.pendingPRs.find((pr) => pr.repo === repo && pr.number === prNumber);
   }
 
   updateReviews(controllers: Map<string, ReviewCommentController>): void {
@@ -140,7 +169,48 @@ export class PROverviewProvider implements vscode.TreeDataProvider<PROverviewIte
     if (element.nodeType === "repo-pending" && element.repoName) {
       return this.getPendingPRItems(element.repoName);
     }
+    if (element.nodeType === "pr-reviewed" && element.reviewFilePath) {
+      return this.getReviewCommentItems(element.reviewFilePath);
+    }
     return [];
+  }
+
+  private getReviewCommentItems(reviewFilePath: string): PROverviewItem[] {
+    const ctrl = this.controllers.get(reviewFilePath);
+    const review = ctrl?.getReview();
+    if (!review) {
+      return [];
+    }
+
+    return review.comments.map((comment, index) => {
+      const label = `${comment.path}:${comment.line}`;
+      const item = new PROverviewItem(
+        label,
+        vscode.TreeItemCollapsibleState.None,
+        "pr-comment",
+        undefined,
+        reviewFilePath,
+        review.pr.number,
+        index,
+      );
+
+      const firstLine = comment.body.split("\n")[0].trim();
+      item.description = `${comment.severity} · ${firstLine}`;
+      item.tooltip = comment.body;
+
+      const { icon, color } = SEVERITY_ICON[comment.severity];
+      item.iconPath = color
+        ? new vscode.ThemeIcon(icon, new vscode.ThemeColor(color))
+        : new vscode.ThemeIcon(icon);
+
+      item.contextValue = "reviewComment";
+      item.command = {
+        command: "agentReview.openReviewComment",
+        title: "Open Review Comment",
+        arguments: [reviewFilePath, index],
+      };
+      return item;
+    });
   }
 
   private getRootItems(): PROverviewItem[] {
@@ -213,10 +283,13 @@ export class PROverviewProvider implements vscode.TreeDataProvider<PROverviewIte
 
       const treeItem = new PROverviewItem(
         `#${review.pr.number} — ${review.pr.title}`,
-        vscode.TreeItemCollapsibleState.None,
+        review.comments.length > 0
+          ? vscode.TreeItemCollapsibleState.Collapsed
+          : vscode.TreeItemCollapsibleState.None,
         "pr-reviewed",
         repoName,
-        filePath
+        filePath,
+        review.pr.number,
       );
 
       const verdict = review.summary.verdict;
@@ -300,6 +373,7 @@ export class PROverviewProvider implements vscode.TreeDataProvider<PROverviewIte
       .filter((pr) => pr.repo === repoName)
       .sort((a, b) => a.number - b.number)
       .map((pr) => {
+        const running = this.runningPRs.has(`${pr.repo}#${pr.number}`);
         const item = new PROverviewItem(
           `#${pr.number} — ${pr.title}`,
           vscode.TreeItemCollapsibleState.None,
@@ -308,8 +382,11 @@ export class PROverviewProvider implements vscode.TreeDataProvider<PROverviewIte
           undefined,
           pr.number
         );
-        item.iconPath = new vscode.ThemeIcon("git-pull-request");
-        item.description = `${pr.author} · ${relativeAge(pr.createdAt)}`;
+        item.iconPath = running
+          ? new vscode.ThemeIcon("loading~spin")
+          : new vscode.ThemeIcon("git-pull-request");
+        const suffix = running ? " (reviewing...)" : "";
+        item.description = `${pr.author} · ${relativeAge(pr.createdAt)}${suffix}`;
         item.tooltip = `${pr.title}\nby ${pr.author} · opened ${relativeAge(pr.createdAt)}`;
         item.contextValue = "pendingPR";
         item.prUrl = `https://github.com/${pr.repo}/pull/${pr.number}`;
